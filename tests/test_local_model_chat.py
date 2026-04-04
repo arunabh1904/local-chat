@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -13,6 +16,7 @@ from local_model_chat.backends import (
     CompletionMetrics,
     CompletionResult,
 )
+from local_model_chat.model_cache import configure_model_cache
 from local_model_chat.presets import get_preset, resolve_initial_preset_id
 from local_model_chat.server import AppServer
 
@@ -75,6 +79,35 @@ class LocalModelChatTests(unittest.TestCase):
         self.assertEqual(manager.snapshot()["current_preset"]["id"], "qwen3-14b-mlx")
         manager.close()
 
+    def test_configure_model_cache_sets_hf_environment(self):
+        tracked = [
+            "LOCAL_CHAT_MODEL_CACHE_DIR",
+            "HF_HOME",
+            "HF_HUB_CACHE",
+            "TRANSFORMERS_CACHE",
+        ]
+        previous = {name: os.environ.get(name) for name in tracked}
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                cache_dir = configure_model_cache(temp_dir)
+                self.assertEqual(cache_dir, Path(temp_dir).resolve())
+                self.assertEqual(os.environ["LOCAL_CHAT_MODEL_CACHE_DIR"], str(cache_dir))
+                self.assertEqual(os.environ["HF_HOME"], str(cache_dir / "huggingface"))
+                self.assertEqual(
+                    os.environ["HF_HUB_CACHE"],
+                    str(cache_dir / "huggingface" / "hub"),
+                )
+                self.assertEqual(
+                    os.environ["TRANSFORMERS_CACHE"],
+                    str(cache_dir / "huggingface" / "transformers"),
+                )
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
     def test_http_endpoints(self):
         manager = BackendManager(
             initial_preset=get_preset("gemma4-e2b-mlx"),
@@ -91,6 +124,7 @@ class LocalModelChatTests(unittest.TestCase):
                 payload = json.loads(response.read().decode("utf-8"))
             self.assertEqual(payload["current_preset"]["id"], "gemma4-e2b-mlx")
             self.assertGreater(len(payload["presets"]), 1)
+            self.assertIn("model_cache_dir", payload)
 
             request = Request(
                 f"{base_url}/api/chat",

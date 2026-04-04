@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${ROOT_DIR}/.venv"
 VENV_PYTHON="${VENV_DIR}/bin/python"
+DEFAULT_MODEL_CACHE_DIR="$(cd "${ROOT_DIR}/.." && pwd)/models"
 
 PYTHON_BIN=""
 
@@ -29,5 +30,7 @@ echo "Next run:"
 echo "  ./run.sh --preset gemma4-26b-a4b-mlx --open-browser"
 echo "Direct entrypoint:"
 echo "  ./.venv/bin/python local_chat.py --preset gemma4-26b-a4b-mlx --open-browser"
+echo "Default model cache:"
+echo "  ${DEFAULT_MODEL_CACHE_DIR}"
 echo
 echo "If you renamed or moved this checkout, rerun ./setup.sh once to refresh any path-bound virtualenv scripts."

@@ -38,6 +38,7 @@ class BackendFactorySettings:
     auto_start_llama: bool = True
     ctx_size: int = 16384
     llama_port: int = LLAMA_INTERNAL_PORT
+    model_cache_dir: str | None = None
 
 
 @dataclass(frozen=True)
@@ -553,6 +554,7 @@ class BackendManager:
                 "error": self.error,
                 "current_preset": self.current_preset.to_public_dict(),
                 "benchmark_url": self.current_preset.benchmark_url,
+                "model_cache_dir": self.settings.model_cache_dir,
             }
 
     def _require_backend(self) -> Backend:
