@@ -25,6 +25,7 @@ DEFAULT_MAX_TOKENS = 512
 REQUEST_TIMEOUT = 60 * 60
 LLAMA_INTERNAL_HOST = "127.0.0.1"
 LLAMA_INTERNAL_PORT = 18080
+BENCHMARK_URL = "https://arunabh1904.github.io/blog/2026/04/04/running-gemma-4-locally-on-a-64-gb-macbook-pro.html"
 
 
 HTML = """<!doctype html>
@@ -32,21 +33,37 @@ HTML = """<!doctype html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f4f8ff" />
     <title>Gemma Local Chat</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500&family=Orbitron:wght@500;700;800&family=Rajdhani:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap"
+    />
     <style>
       :root {
-        --bg: #f4efe6;
-        --panel: #fffaf2;
-        --panel-strong: #f8f1e6;
-        --ink: #1f1a17;
-        --muted: #6d6259;
-        --line: #d9cdbf;
-        --accent: #c76d3a;
-        --accent-soft: #f3d4c2;
-        --user: #201914;
-        --user-ink: #fdf8f3;
-        --assistant: #fffaf2;
-        --shadow: 0 18px 50px rgba(88, 63, 35, 0.12);
+        color-scheme: light;
+        --font-body: "Rajdhani", sans-serif;
+        --font-heading: "Orbitron", sans-serif;
+        --font-reading: "IBM Plex Sans", sans-serif;
+        --font-mono: "Roboto Mono", monospace;
+        --bg: #f4f8ff;
+        --bg-secondary: #e5eefc;
+        --text: #10213f;
+        --muted: #4d628f;
+        --accent: #356dff;
+        --accent-soft: rgba(53, 109, 255, 0.1);
+        --accent-strong: rgba(53, 109, 255, 0.18);
+        --panel: rgba(245, 249, 255, 0.84);
+        --panel-strong: rgba(248, 251, 255, 0.96);
+        --panel-elevated: linear-gradient(145deg, rgba(248, 251, 255, 0.94), rgba(228, 238, 255, 0.9));
+        --line: rgba(53, 109, 255, 0.16);
+        --line-strong: rgba(53, 109, 255, 0.32);
+        --shadow: 0 0 0 1px rgba(53, 109, 255, 0.05), 0 18px 44px rgba(53, 85, 150, 0.12);
+        --assistant: linear-gradient(145deg, rgba(255, 255, 255, 0.98), rgba(242, 247, 255, 0.92));
+        --user: linear-gradient(145deg, rgba(53, 109, 255, 0.98), rgba(87, 135, 255, 0.94));
+        --system: rgba(247, 250, 255, 0.76);
       }
 
       * { box-sizing: border-box; }
@@ -55,69 +72,111 @@ HTML = """<!doctype html>
         margin: 0;
         min-height: 100vh;
         background:
-          radial-gradient(circle at top left, rgba(199, 109, 58, 0.16), transparent 32%),
-          radial-gradient(circle at bottom right, rgba(90, 119, 96, 0.12), transparent 28%),
-          var(--bg);
-        color: var(--ink);
-        font-family: "Avenir Next", "Segoe UI", sans-serif;
+          radial-gradient(circle at top, rgba(77, 132, 255, 0.1), transparent 34%),
+          linear-gradient(180deg, rgba(231, 240, 255, 0.56), transparent 22%),
+          linear-gradient(145deg, var(--bg), var(--bg-secondary));
+        color: var(--text);
+        font-family: var(--font-body);
       }
 
       .shell {
         width: min(980px, calc(100vw - 32px));
         margin: 28px auto;
-        background: rgba(255, 250, 242, 0.82);
-        border: 1px solid rgba(217, 205, 191, 0.85);
+        background: var(--panel-elevated);
+        border: 1px solid var(--line);
         border-radius: 28px;
         box-shadow: var(--shadow);
         backdrop-filter: blur(20px);
+        -webkit-backdrop-filter: blur(20px);
         overflow: hidden;
+        position: relative;
+        z-index: 1;
       }
 
       .hero {
         display: grid;
         gap: 14px;
-        padding: 24px 24px 18px;
+        padding: 26px 24px 18px;
         border-bottom: 1px solid var(--line);
         background:
-          linear-gradient(135deg, rgba(255, 255, 255, 0.74), rgba(255, 247, 236, 0.92)),
+          linear-gradient(145deg, rgba(248, 251, 255, 0.96), rgba(235, 242, 255, 0.92)),
           var(--panel);
+      }
+
+      .eyebrow {
+        margin: 0;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .hero-row {
+        display: grid;
+        gap: 12px;
       }
 
       .hero h1 {
         margin: 0;
-        font-size: clamp(28px, 4vw, 38px);
-        letter-spacing: -0.03em;
-        line-height: 0.95;
+        font-size: clamp(30px, 4vw, 40px);
+        letter-spacing: -0.01em;
+        line-height: 1;
+        font-family: var(--font-heading);
       }
 
       .hero p {
         margin: 0;
         color: var(--muted);
         font-size: 15px;
-        line-height: 1.45;
+        line-height: 1.6;
+        font-family: var(--font-reading);
+        max-width: 62ch;
       }
 
-      .meta {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-      }
-
+      .hero-link,
       .pill {
         display: inline-flex;
         align-items: center;
         gap: 8px;
         padding: 8px 12px;
-        background: var(--panel-strong);
+        background: rgba(248, 251, 255, 0.94);
         border: 1px solid var(--line);
         border-radius: 999px;
         font-size: 13px;
         color: var(--muted);
       }
 
+      .hero-link {
+        text-decoration: none;
+        transition:
+          border-color 0.16s ease,
+          color 0.16s ease,
+          transform 0.16s ease,
+          background-color 0.16s ease;
+      }
+
+      .hero-link:hover {
+        color: var(--text);
+        border-color: var(--line-strong);
+        background: rgba(239, 245, 255, 0.98);
+        transform: translateY(-1px);
+      }
+
+      .hero-link strong {
+        color: var(--accent);
+        font-weight: 700;
+      }
+
       .pill strong {
-        color: var(--ink);
+        color: var(--accent);
         font-weight: 600;
+      }
+
+      .meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
       }
 
       .chat {
@@ -132,6 +191,7 @@ HTML = """<!doctype html>
         gap: 14px;
         align-content: start;
         overflow-y: auto;
+        background: linear-gradient(180deg, rgba(248, 251, 255, 0.46), rgba(245, 249, 255, 0.2));
       }
 
       .message {
@@ -142,24 +202,26 @@ HTML = """<!doctype html>
         white-space: pre-wrap;
         line-height: 1.55;
         font-size: 15px;
-        box-shadow: 0 8px 24px rgba(88, 63, 35, 0.06);
+        box-shadow: 0 10px 28px rgba(53, 85, 150, 0.08);
+        font-family: var(--font-reading);
       }
 
       .message.user {
         margin-left: auto;
         background: var(--user);
-        border-color: rgba(32, 25, 20, 0.9);
-        color: var(--user-ink);
+        border-color: rgba(53, 109, 255, 0.34);
+        color: #fdfefe;
         border-bottom-right-radius: 6px;
       }
 
       .message.assistant {
         background: var(--assistant);
         border-bottom-left-radius: 6px;
+        color: var(--text);
       }
 
       .message.system {
-        background: transparent;
+        background: var(--system);
         border-style: dashed;
         color: var(--muted);
       }
@@ -167,7 +229,7 @@ HTML = """<!doctype html>
       .composer {
         padding: 18px 22px 22px;
         border-top: 1px solid var(--line);
-        background: rgba(255, 250, 242, 0.95);
+        background: var(--panel-strong);
       }
 
       .controls {
@@ -184,6 +246,7 @@ HTML = """<!doctype html>
         text-transform: uppercase;
         letter-spacing: 0.08em;
         color: var(--muted);
+        font-weight: 700;
       }
 
       input[type="number"] {
@@ -193,7 +256,8 @@ HTML = """<!doctype html>
         padding: 10px 12px;
         font: inherit;
         background: white;
-        color: var(--ink);
+        color: var(--text);
+        box-shadow: inset 0 0 0 1px rgba(53, 109, 255, 0.04);
       }
 
       textarea {
@@ -206,7 +270,13 @@ HTML = """<!doctype html>
         font: inherit;
         line-height: 1.5;
         background: white;
-        color: var(--ink);
+        color: var(--text);
+        font-family: var(--font-reading);
+        box-shadow: inset 0 0 0 1px rgba(53, 109, 255, 0.04);
+      }
+
+      textarea::placeholder {
+        color: rgba(77, 98, 143, 0.88);
       }
 
       .actions {
@@ -221,6 +291,7 @@ HTML = """<!doctype html>
       .hint {
         color: var(--muted);
         font-size: 13px;
+        font-family: var(--font-reading);
       }
 
       button {
@@ -237,13 +308,32 @@ HTML = """<!doctype html>
       button:disabled { opacity: 0.55; cursor: wait; transform: none; }
 
       .primary {
-        background: var(--accent);
+        background: linear-gradient(145deg, rgba(53, 109, 255, 0.96), rgba(78, 125, 255, 0.94));
         color: white;
+        box-shadow: 0 0 0 1px rgba(53, 109, 255, 0.12), 0 12px 28px rgba(53, 85, 150, 0.16);
       }
 
       .secondary {
-        background: var(--accent-soft);
-        color: var(--ink);
+        background: rgba(248, 251, 255, 0.94);
+        color: var(--accent);
+        border: 1px solid var(--line);
+      }
+
+      a {
+        color: inherit;
+      }
+
+      input,
+      textarea,
+      button {
+        outline: none;
+      }
+
+      input:focus,
+      textarea:focus,
+      button:focus-visible {
+        border-color: var(--line-strong);
+        box-shadow: 0 0 0 1px rgba(53, 109, 255, 0.16), 0 0 0 6px rgba(53, 109, 255, 0.05);
       }
 
       @media (max-width: 720px) {
@@ -256,11 +346,20 @@ HTML = """<!doctype html>
   <body>
     <div class="shell">
       <section class="hero">
-        <h1>Gemma Local Chat</h1>
-        <p>
-          A tiny local chat app for Gemma 4. It keeps conversation state in the browser and
-          sends each turn to your local backend.
-        </p>
+        <p class="eyebrow">Local UI</p>
+        <div class="hero-row">
+          <div>
+            <h1>Gemma Local Chat</h1>
+            <p>
+              A small local browser chat app for Gemma 4. It keeps conversation state in the
+              browser and sends each turn to your local backend.
+            </p>
+          </div>
+          <a class="hero-link" href="__BENCHMARK_URL__" target="_blank" rel="noreferrer">
+            <strong>Benchmark Note</strong>
+            <span>Read the Gemma 4 benchmark post</span>
+          </a>
+        </div>
         <div class="meta">
           <div class="pill"><strong>Runtime</strong> <span id="runtime">Loading...</span></div>
           <div class="pill"><strong>Model</strong> <span id="model">Loading...</span></div>
@@ -651,7 +750,11 @@ class ChatHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/":
-            self._send_html(HTML.replace("__DEFAULT_MAX_TOKENS__", str(self.server.default_max_tokens)))
+            page = (
+                HTML.replace("__DEFAULT_MAX_TOKENS__", str(self.server.default_max_tokens))
+                .replace("__BENCHMARK_URL__", BENCHMARK_URL)
+            )
+            self._send_html(page)
             return
         if self.path == "/api/info":
             self._send_json(

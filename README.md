@@ -2,6 +2,8 @@
 
 A tiny local browser chat app for Gemma 4 on Apple Silicon.
 
+The UI is intentionally light and minimal, with one small link back to the published Gemma 4 benchmark post.
+
 It supports:
 
 - `MLX` for the most Apple-native path
