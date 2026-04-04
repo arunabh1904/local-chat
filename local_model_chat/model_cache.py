@@ -8,8 +8,7 @@ MODEL_CACHE_ENV_VAR = "LOCAL_CHAT_MODEL_CACHE_DIR"
 
 
 def default_model_cache_dir() -> Path:
-    workspace_root = Path(__file__).resolve().parents[2]
-    return workspace_root / "models"
+    return Path.home() / ".cache"
 
 
 def resolve_model_cache_dir(model_cache_dir: str | None = None) -> Path:

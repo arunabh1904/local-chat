@@ -16,7 +16,7 @@ from local_model_chat.backends import (
     CompletionMetrics,
     CompletionResult,
 )
-from local_model_chat.model_cache import configure_model_cache
+from local_model_chat.model_cache import configure_model_cache, default_model_cache_dir
 from local_model_chat.presets import get_preset, resolve_initial_preset_id
 from local_model_chat.server import AppServer
 
@@ -107,6 +107,9 @@ class LocalModelChatTests(unittest.TestCase):
                     os.environ.pop(name, None)
                 else:
                     os.environ[name] = value
+
+    def test_default_model_cache_dir_uses_home_cache(self):
+        self.assertEqual(default_model_cache_dir(), Path.home() / ".cache")
 
     def test_http_endpoints(self):
         manager = BackendManager(
