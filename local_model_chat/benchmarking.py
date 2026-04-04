@@ -25,12 +25,6 @@ DEFAULT_BENCHMARK_PRESET_IDS = [
     "qwen3-14b-mlx",
     "qwen3-30b-a3b-mlx",
     "qwen3-32b-mlx",
-    "qwen35-9b-llama",
-    "qwen35-27b-llama",
-    "qwen35-35b-a3b-llama",
-    "qwen3-14b-llama",
-    "qwen3-30b-a3b-llama",
-    "qwen3-32b-llama",
 ]
 
 EXCLUDED_MODELS = [
@@ -114,10 +108,7 @@ def run_single_benchmark(
     try:
         result: CompletionResult
         messages = build_prompt(suite["target_prompt_tokens"])
-        if preset.runtime == "llama":
-            result = backend.benchmark(messages, max_tokens=suite["max_tokens"])  # type: ignore[attr-defined]
-        else:
-            result = backend.generate(messages, max_tokens=suite["max_tokens"])
+        result = backend.generate(messages, max_tokens=suite["max_tokens"])
         metrics = result.metrics
         return BenchmarkRun(
             preset_id=preset.id,
@@ -252,14 +243,11 @@ def parse_args() -> argparse.Namespace:
         help="Specific suite to run. Repeat for multiple values.",
     )
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--llama-url", default=None)
-    parser.add_argument("--no-auto-start-llama", action="store_true")
-    parser.add_argument("--llama-port", type=int, default=18080)
     parser.add_argument("--ctx-size", type=int, default=16384)
     parser.add_argument(
         "--model-cache-dir",
         default=None,
-        help="Cache root for downloaded model artifacts. Defaults to a sibling `models/` directory.",
+        help="Cache root for downloaded model artifacts. Defaults to `~/.cache`.",
     )
     return parser.parse_args()
 
@@ -275,10 +263,7 @@ def main() -> int:
 
     model_cache_dir = configure_model_cache(args.model_cache_dir)
     settings = BackendFactorySettings(
-        llama_url=args.llama_url,
-        auto_start_llama=not args.no_auto_start_llama,
         ctx_size=args.ctx_size,
-        llama_port=args.llama_port,
         model_cache_dir=str(model_cache_dir),
     )
 

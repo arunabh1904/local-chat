@@ -21,6 +21,28 @@ from local_model_chat.presets import get_preset, resolve_initial_preset_id
 from local_model_chat.server import AppServer
 
 
+TEST_IMAGE = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9p2L1ZkAAAAASUVORK5CYII="
+)
+
+
+def flatten_content(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        pieces = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text":
+                pieces.append(item.get("text", ""))
+            elif item.get("type") == "image":
+                pieces.append("[image]")
+        return " ".join(piece for piece in pieces if piece).strip()
+    return ""
+
+
 class FakeBackend(Backend):
     runtime_name = "Fake"
 
@@ -28,8 +50,12 @@ class FakeBackend(Backend):
         self.display_model = preset_id
         self.closed = False
 
-    def generate(self, messages, max_tokens):
-        if messages and messages[0]["role"] == "system" and "compress a conversation" in messages[0]["content"].lower():
+    def generate(self, messages, max_tokens, conversation_image=None):
+        if (
+            messages
+            and messages[0]["role"] == "system"
+            and "compress a conversation" in flatten_content(messages[0]["content"]).lower()
+        ):
             return CompletionResult(
                 text="user wants to keep testing local model presets",
                 metrics=CompletionMetrics(generation_tokens=11),
@@ -37,8 +63,10 @@ class FakeBackend(Backend):
         last_user = ""
         for message in reversed(messages):
             if message["role"] == "user":
-                last_user = message["content"]
+                last_user = flatten_content(message["content"])
                 break
+        if conversation_image is not None:
+            last_user = f"{last_user} [image:{conversation_image.name}]".strip()
         return CompletionResult(
             text=f"{self.display_model}:{last_user}",
             metrics=CompletionMetrics(prompt_tokens=42, generation_tokens=8),
@@ -61,7 +89,7 @@ class LocalModelChatTests(unittest.TestCase):
         )
         self.assertEqual(
             resolve_initial_preset_id(None, "llama", "31b"),
-            "gemma4-31b-llama",
+            "gemma4-31b-mlx",
         )
 
     def test_backend_manager_switches_and_summarizes(self):
@@ -128,6 +156,8 @@ class LocalModelChatTests(unittest.TestCase):
             self.assertEqual(payload["current_preset"]["id"], "gemma4-e2b-mlx")
             self.assertGreater(len(payload["presets"]), 1)
             self.assertIn("model_cache_dir", payload)
+            self.assertFalse(payload["current_preset"]["supports_images"])
+            self.assertTrue(any(item["supports_images"] for item in payload["presets"]))
 
             request = Request(
                 f"{base_url}/api/chat",
@@ -136,6 +166,11 @@ class LocalModelChatTests(unittest.TestCase):
                         "messages": [{"role": "user", "content": "hello"}],
                         "conversation_summary": "prior summary",
                         "max_tokens": 64,
+                        "conversation_image": {
+                            "name": "tiny.png",
+                            "media_type": "image/png",
+                            "data_url": TEST_IMAGE,
+                        },
                     }
                 ).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
@@ -144,6 +179,7 @@ class LocalModelChatTests(unittest.TestCase):
             with urlopen(request) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             self.assertIn("hello", payload["reply"])
+            self.assertIn("tiny.png", payload["reply"])
 
             switch_request = Request(
                 f"{base_url}/api/switch-preset",

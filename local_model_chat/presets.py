@@ -32,7 +32,11 @@ class Preset:
     def runtime_label(self) -> str:
         return "MLX" if self.runtime == "mlx" else "llama.cpp"
 
-    def to_public_dict(self) -> dict[str, str]:
+    @property
+    def supports_images(self) -> bool:
+        return self.loader_kind == "mlx_vlm"
+
+    def to_public_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "family": self.family,
@@ -40,6 +44,7 @@ class Preset:
             "runtime": self.runtime,
             "runtime_label": self.runtime_label,
             "benchmark_url": self.benchmark_url,
+            "supports_images": self.supports_images,
         }
 
 
@@ -107,46 +112,6 @@ PRESETS: tuple[Preset, ...] = (
         benchmark_url=GEMMA_BENCHMARK_URL,
     ),
     _preset(
-        preset_id="gemma4-e2b-llama",
-        family="Gemma 4",
-        label="Gemma 4 E2B",
-        runtime="llama",
-        loader_kind="llama_cpp",
-        hf_repo="ggml-org/gemma-4-E2B-it-GGUF",
-        hf_file="gemma-4-e2b-it-Q8_0.gguf",
-        benchmark_url=GEMMA_BENCHMARK_URL,
-    ),
-    _preset(
-        preset_id="gemma4-e4b-llama",
-        family="Gemma 4",
-        label="Gemma 4 E4B",
-        runtime="llama",
-        loader_kind="llama_cpp",
-        hf_repo="ggml-org/gemma-4-E4B-it-GGUF",
-        hf_file="gemma-4-e4b-it-Q4_K_M.gguf",
-        benchmark_url=GEMMA_BENCHMARK_URL,
-    ),
-    _preset(
-        preset_id="gemma4-26b-a4b-llama",
-        family="Gemma 4",
-        label="Gemma 4 26B A4B",
-        runtime="llama",
-        loader_kind="llama_cpp",
-        hf_repo="ggml-org/gemma-4-26B-A4B-it-GGUF",
-        hf_file="gemma-4-26B-A4B-it-Q4_K_M.gguf",
-        benchmark_url=GEMMA_BENCHMARK_URL,
-    ),
-    _preset(
-        preset_id="gemma4-31b-llama",
-        family="Gemma 4",
-        label="Gemma 4 31B",
-        runtime="llama",
-        loader_kind="llama_cpp",
-        hf_repo="ggml-org/gemma-4-31B-it-GGUF",
-        hf_file="gemma-4-31B-it-Q4_K_M.gguf",
-        benchmark_url=GEMMA_BENCHMARK_URL,
-    ),
-    _preset(
         preset_id="qwen35-4b-mlx",
         family="Qwen 3.5",
         label="Qwen 3.5 4B",
@@ -180,36 +145,6 @@ PRESETS: tuple[Preset, ...] = (
         runtime="mlx",
         loader_kind="mlx_vlm",
         hf_repo="mlx-community/Qwen3.5-35B-A3B-4bit",
-        benchmark_url=QWEN_BENCHMARK_URL,
-    ),
-    _preset(
-        preset_id="qwen35-9b-llama",
-        family="Qwen 3.5",
-        label="Qwen 3.5 9B",
-        runtime="llama",
-        loader_kind="llama_cpp",
-        hf_repo="unsloth/Qwen3.5-9B-GGUF",
-        hf_file="Qwen3.5-9B-Q4_K_M.gguf",
-        benchmark_url=QWEN_BENCHMARK_URL,
-    ),
-    _preset(
-        preset_id="qwen35-27b-llama",
-        family="Qwen 3.5",
-        label="Qwen 3.5 27B",
-        runtime="llama",
-        loader_kind="llama_cpp",
-        hf_repo="unsloth/Qwen3.5-27B-GGUF",
-        hf_file="Qwen3.5-27B-Q4_K_M.gguf",
-        benchmark_url=QWEN_BENCHMARK_URL,
-    ),
-    _preset(
-        preset_id="qwen35-35b-a3b-llama",
-        family="Qwen 3.5",
-        label="Qwen 3.5 35B A3B",
-        runtime="llama",
-        loader_kind="llama_cpp",
-        hf_repo="unsloth/Qwen3.5-35B-A3B-GGUF",
-        hf_file="Qwen3.5-35B-A3B-Q4_K_M.gguf",
         benchmark_url=QWEN_BENCHMARK_URL,
     ),
     _preset(
@@ -248,36 +183,6 @@ PRESETS: tuple[Preset, ...] = (
         hf_repo="mlx-community/Qwen3-32B-4bit",
         benchmark_url=QWEN_BENCHMARK_URL,
     ),
-    _preset(
-        preset_id="qwen3-14b-llama",
-        family="Qwen 3",
-        label="Qwen 3 14B",
-        runtime="llama",
-        loader_kind="llama_cpp",
-        hf_repo="Qwen/Qwen3-14B-GGUF",
-        hf_file="Qwen3-14B-Q4_K_M.gguf",
-        benchmark_url=QWEN_BENCHMARK_URL,
-    ),
-    _preset(
-        preset_id="qwen3-30b-a3b-llama",
-        family="Qwen 3",
-        label="Qwen 3 30B A3B",
-        runtime="llama",
-        loader_kind="llama_cpp",
-        hf_repo="Qwen/Qwen3-30B-A3B-GGUF",
-        hf_file="Qwen3-30B-A3B-Q4_K_M.gguf",
-        benchmark_url=QWEN_BENCHMARK_URL,
-    ),
-    _preset(
-        preset_id="qwen3-32b-llama",
-        family="Qwen 3",
-        label="Qwen 3 32B",
-        runtime="llama",
-        loader_kind="llama_cpp",
-        hf_repo="Qwen/Qwen3-32B-GGUF",
-        hf_file="Qwen3-32B-Q4_K_M.gguf",
-        benchmark_url=QWEN_BENCHMARK_URL,
-    ),
 )
 
 PRESET_BY_ID = {preset.id: preset for preset in PRESETS}
@@ -287,10 +192,10 @@ LEGACY_MODEL_MAP = {
     ("mlx", "e4b"): "gemma4-e4b-mlx",
     ("mlx", "26b"): "gemma4-26b-a4b-mlx",
     ("mlx", "31b"): "gemma4-31b-mlx",
-    ("llama", "e2b"): "gemma4-e2b-llama",
-    ("llama", "e4b"): "gemma4-e4b-llama",
-    ("llama", "26b"): "gemma4-26b-a4b-llama",
-    ("llama", "31b"): "gemma4-31b-llama",
+    ("llama", "e2b"): "gemma4-e2b-mlx",
+    ("llama", "e4b"): "gemma4-e4b-mlx",
+    ("llama", "26b"): "gemma4-26b-a4b-mlx",
+    ("llama", "31b"): "gemma4-31b-mlx",
 }
 
 
