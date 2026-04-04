@@ -1,8 +1,6 @@
-#!/usr/bin/env python3
-
 from __future__ import annotations
 
-from local_chat import main
+from .server import main
 
 
 if __name__ == "__main__":

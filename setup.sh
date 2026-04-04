@@ -26,4 +26,6 @@ python -m pip install -r "${ROOT_DIR}/requirements.txt"
 echo
 echo "Setup complete."
 echo "Next run:"
-echo "  ./run.sh --runtime mlx --model 26b --open-browser"
+echo "  ./run.sh --preset gemma4-26b-a4b-mlx --open-browser"
+echo "Direct entrypoint:"
+echo "  python local_chat.py --preset gemma4-26b-a4b-mlx --open-browser"
