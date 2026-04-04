@@ -4,7 +4,7 @@ A tiny local browser chat app for Apple Silicon with switchable local model pres
 
 This repo started as a Gemma-only chat app. It now supports ad hoc weight reloads from the UI, so you can choose a preset from a dropdown and swap the active locally served model without restarting the app yourself.
 
-The GitHub repo name is still `gemma-local-chat` for continuity, but the app itself is now branded as `Local Chat`.
+The GitHub repo is now `local-chat`, and the app itself is branded as `Local Chat`.
 
 It currently supports:
 
@@ -20,7 +20,7 @@ The UI stays intentionally small. Chat history lives in the browser session, and
 ## Quick Start
 
 ```bash
-cd /Users/arunabhmishra/Code/gemma-local-chat
+cd /Users/arunabhmishra/Code/local-chat
 ./setup.sh
 ./run.sh --preset gemma4-26b-a4b-mlx --open-browser
 ```
@@ -30,7 +30,7 @@ Then open [http://127.0.0.1:8099](http://127.0.0.1:8099).
 If you want the direct entrypoint instead of `run.sh`, use:
 
 ```bash
-python local_chat.py --preset gemma4-26b-a4b-mlx
+./.venv/bin/python local_chat.py --preset gemma4-26b-a4b-mlx
 ```
 
 ## What Changed
@@ -68,15 +68,13 @@ The benchmark runner reuses the same preset registry and backend code as the app
 Run the default Qwen matrix:
 
 ```bash
-source .venv/bin/activate
-python benchmark_local_models.py
+./.venv/bin/python benchmark_local_models.py
 ```
 
 Run a smaller slice:
 
 ```bash
-source .venv/bin/activate
-python benchmark_local_models.py --preset qwen35-4b-mlx --preset qwen3-14b-llama --suite short
+./.venv/bin/python benchmark_local_models.py --preset qwen35-4b-mlx --preset qwen3-14b-llama --suite short
 ```
 
 Results are written under `benchmarks/results/` as JSON and Markdown.
@@ -87,6 +85,7 @@ Results are written under `benchmarks/results/` as JSON and Markdown.
 - The app is text-only in this pass. Qwen 3.5 is served without images.
 - The first load for any preset can take a while because weights download on demand.
 - The UI links to a family-specific benchmark post for the active preset.
+- If you already had a `.venv` under the old `gemma-local-chat` path, rerun `./setup.sh` once after pulling the rename so path-bound virtualenv scripts are refreshed.
 - As of April 4, 2026, the official local/open Qwen benchmark scope in this repo covers `Qwen 3.5` and `Qwen 3`. No official open local `Qwen 3.6` target was found.
 
 ## CLI

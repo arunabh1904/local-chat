@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${ROOT_DIR}/.venv"
+VENV_PYTHON="${VENV_DIR}/bin/python"
 
 PYTHON_BIN=""
 
@@ -19,13 +20,14 @@ if [[ -z "${PYTHON_BIN}" ]]; then
 fi
 
 "${PYTHON_BIN}" -m venv "${VENV_DIR}"
-source "${VENV_DIR}/bin/activate"
-python -m pip install --upgrade pip
-python -m pip install -r "${ROOT_DIR}/requirements.txt"
+"${VENV_PYTHON}" -m pip install --upgrade pip
+"${VENV_PYTHON}" -m pip install -r "${ROOT_DIR}/requirements.txt"
 
 echo
 echo "Setup complete."
 echo "Next run:"
 echo "  ./run.sh --preset gemma4-26b-a4b-mlx --open-browser"
 echo "Direct entrypoint:"
-echo "  python local_chat.py --preset gemma4-26b-a4b-mlx --open-browser"
+echo "  ./.venv/bin/python local_chat.py --preset gemma4-26b-a4b-mlx --open-browser"
+echo
+echo "If you renamed or moved this checkout, rerun ./setup.sh once to refresh any path-bound virtualenv scripts."
