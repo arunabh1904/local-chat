@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from .backends import BackendManager, BackendFactorySettings
+from .model_cache import configure_model_cache
 from .presets import (
     DEFAULT_PRESET_ID,
     all_presets,
@@ -807,6 +808,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--llama-port", type=int, default=18080)
     parser.add_argument("--ctx-size", type=int, default=16384)
+    parser.add_argument(
+        "--model-cache-dir",
+        default=None,
+        help="Cache root for downloaded model artifacts. Defaults to a sibling `models/` directory.",
+    )
     parser.add_argument("--list-presets", action="store_true")
     return parser
 
@@ -825,12 +831,14 @@ def main() -> int:
 
     preset_id = resolve_initial_preset_id(args.preset, args.runtime, args.model)
     initial_preset = get_preset(preset_id)
+    model_cache_dir = configure_model_cache(args.model_cache_dir)
     settings = BackendFactorySettings(
         system_prompt=args.system_prompt or "You are a concise, helpful assistant. Answer directly and clearly.",
         llama_url=args.llama_url,
         auto_start_llama=not args.no_auto_start_llama,
         ctx_size=args.ctx_size,
         llama_port=args.llama_port,
+        model_cache_dir=str(model_cache_dir),
     )
     manager = BackendManager(initial_preset=initial_preset, settings=settings)
     server = AppServer((args.host, args.port), manager, default_max_tokens=args.max_tokens)
@@ -840,6 +848,7 @@ def main() -> int:
         f"[local-chat] Initial preset: {initial_preset.label} ({initial_preset.runtime_label})",
         flush=True,
     )
+    print(f"[local-chat] Model cache: {model_cache_dir}", flush=True)
 
     if args.open_browser:
         webbrowser.open(url)

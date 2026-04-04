@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .backends import BackendFactorySettings, CompletionResult, create_backend
+from .model_cache import configure_model_cache
 from .presets import PRESET_BY_ID, get_preset
 
 
@@ -255,6 +256,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-auto-start-llama", action="store_true")
     parser.add_argument("--llama-port", type=int, default=18080)
     parser.add_argument("--ctx-size", type=int, default=16384)
+    parser.add_argument(
+        "--model-cache-dir",
+        default=None,
+        help="Cache root for downloaded model artifacts. Defaults to a sibling `models/` directory.",
+    )
     return parser.parse_args()
 
 
@@ -267,11 +273,13 @@ def main() -> int:
         if preset_id not in PRESET_BY_ID:
             raise SystemExit(f"Unknown preset `{preset_id}`")
 
+    model_cache_dir = configure_model_cache(args.model_cache_dir)
     settings = BackendFactorySettings(
         llama_url=args.llama_url,
         auto_start_llama=not args.no_auto_start_llama,
         ctx_size=args.ctx_size,
         llama_port=args.llama_port,
+        model_cache_dir=str(model_cache_dir),
     )
 
     output_dir = Path(args.output_dir)
@@ -292,6 +300,7 @@ def main() -> int:
     if json_path is None or md_path is None:
         json_path, md_path = write_outputs(output_dir, stamp, runs)
 
+    print(f"[benchmark] model cache: {model_cache_dir}", flush=True)
     print(f"[benchmark] wrote {json_path}", flush=True)
     print(f"[benchmark] wrote {md_path}", flush=True)
     return 0
