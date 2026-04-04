@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from local_chat import main
+from local_model_chat.server import main
 
 
 if __name__ == "__main__":

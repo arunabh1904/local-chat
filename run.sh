@@ -10,5 +10,4 @@ if [[ ! -d "${VENV_DIR}" ]]; then
 fi
 
 source "${VENV_DIR}/bin/activate"
-exec python "${ROOT_DIR}/gemma_local_chat.py" "$@"
-
+exec python "${ROOT_DIR}/local_chat.py" "$@"
