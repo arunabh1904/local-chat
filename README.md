@@ -17,7 +17,7 @@ It currently supports:
 
 The UI stays intentionally small. Chat history lives in the browser session, and switching presets clears the visible transcript while carrying a short summary forward into the next model.
 
-Model artifacts are cached on disk under a sibling `models/` directory by default, so switching presets reuses downloaded files instead of fetching them again. The reload still has to happen in memory because only one large local model stays active at a time.
+Model artifacts are cached on disk under `~/.cache` by default, so preset switches reuse the shared Hugging Face downloads you already have instead of fetching them again. The reload still has to happen in memory because only one large local model stays active at a time.
 
 ## Quick Start
 
@@ -38,14 +38,14 @@ If you want the direct entrypoint instead of `run.sh`, use:
 Override the cache location if you want:
 
 ```bash
-./run.sh --model-cache-dir /Users/arunabhmishra/Code/models --preset qwen3-14b-mlx
+./run.sh --model-cache-dir /Users/arunabhmishra/.cache --preset qwen3-14b-mlx
 ```
 
 ## What Changed
 
 - One dropdown now lists supported local presets.
 - Changing the dropdown triggers a backend reload and weight swap.
-- Downloaded weights now default to a shared sibling `models/` cache directory.
+- Downloaded weights now default to the shared `~/.cache` Hugging Face cache root.
 - The server exposes preset metadata through `/api/info`.
 - Qwen benchmark automation now lives in `benchmark_local_models.py`.
 - `--preset` is the main startup flag.
@@ -89,7 +89,7 @@ Run a smaller slice:
 Use a custom cache root for benchmark runs:
 
 ```bash
-./.venv/bin/python benchmark_local_models.py --model-cache-dir /Users/arunabhmishra/Code/models
+./.venv/bin/python benchmark_local_models.py --model-cache-dir /Users/arunabhmishra/.cache
 ```
 
 Results are written under `benchmarks/results/` as JSON and Markdown.
@@ -99,6 +99,7 @@ Results are written under `benchmarks/results/` as JSON and Markdown.
 - `setup.sh` installs `mlx-lm`, `mlx-vlm`, plus `torch` and `torchvision`, because Qwen 3.5 MLX presets still instantiate the upstream Qwen3-VL processor stack even in text-only mode.
 - The app is text-only in this pass. Qwen 3.5 is served without images.
 - The first load for any preset can take a while because weights download on demand.
+- By default, downloads now reuse the shared cache under `~/.cache/huggingface`.
 - After the first download, preset switches reuse the on-disk cache and only pay the weight unload/reload cost in memory.
 - The UI links to a family-specific benchmark post for the active preset.
 - If you already had a `.venv` under the old `gemma-local-chat` path, rerun `./setup.sh` once after pulling the rename so path-bound virtualenv scripts are refreshed.
@@ -121,4 +122,4 @@ Useful flags:
 - `--system-prompt "You are a concise assistant."`
 - `--no-auto-start-llama`
 - `--llama-url http://127.0.0.1:8080`
-- `--model-cache-dir /Users/arunabhmishra/Code/models`
+- `--model-cache-dir /Users/arunabhmishra/.cache`

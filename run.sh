@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${ROOT_DIR}/.venv"
 PYTHON_BIN="${VENV_DIR}/bin/python"
-DEFAULT_MODEL_CACHE_DIR="$(cd "${ROOT_DIR}/.." && pwd)/models"
+DEFAULT_MODEL_CACHE_DIR="${HOME}/.cache"
 
 if [[ ! -d "${VENV_DIR}" ]]; then
   echo "Missing ${VENV_DIR}. Run ./setup.sh first." >&2
