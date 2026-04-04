@@ -1,0 +1,3 @@
+requests>=2.32.0
+huggingface_hub>=0.30.0
+mlx-lm @ git+https://github.com/ml-explore/mlx-lm.git@4469ad464702a66ad49d5aade1c85fa2d42c8251
