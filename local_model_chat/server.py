@@ -7,14 +7,12 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from .backends import BackendManager, BackendFactorySettings
+from .backends import BackendManager, BackendFactorySettings, ConversationImage
 from .model_cache import configure_model_cache
 from .presets import (
-    DEFAULT_PRESET_ID,
     all_presets,
     get_preset,
     resolve_initial_preset_id,
-    runtime_model_help,
 )
 
 
@@ -281,6 +279,110 @@ HTML = """<!doctype html>
         font-family: var(--font-reading);
       }
 
+      .dropzone {
+        margin-top: 12px;
+        padding: 16px;
+        border: 1.5px dashed var(--line-strong);
+        border-radius: 18px;
+        background: rgba(247, 250, 255, 0.86);
+        color: var(--muted);
+        display: grid;
+        gap: 10px;
+        transition:
+          border-color 0.16s ease,
+          background-color 0.16s ease,
+          transform 0.16s ease;
+      }
+
+      .dropzone.active {
+        border-color: var(--accent);
+        background: rgba(232, 241, 255, 0.92);
+        transform: translateY(-1px);
+      }
+
+      .dropzone.disabled {
+        opacity: 0.65;
+      }
+
+      .dropzone-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .dropzone-title {
+        font-size: 13px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .dropzone-copy {
+        font-family: var(--font-reading);
+        font-size: 14px;
+        line-height: 1.55;
+      }
+
+      .attachment-preview {
+        display: none;
+        gap: 14px;
+        align-items: center;
+        grid-template-columns: 112px minmax(0, 1fr);
+      }
+
+      .attachment-preview.visible {
+        display: grid;
+      }
+
+      .attachment-preview img {
+        width: 112px;
+        height: 112px;
+        object-fit: cover;
+        border-radius: 16px;
+        border: 1px solid var(--line);
+        background: white;
+      }
+
+      .attachment-meta {
+        display: grid;
+        gap: 8px;
+        min-width: 0;
+      }
+
+      .attachment-name {
+        color: var(--text);
+        font-weight: 700;
+        font-size: 15px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .attachment-note {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.5;
+        font-family: var(--font-reading);
+      }
+
+      .message-image-note {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: rgba(248, 251, 255, 0.88);
+        border: 1px solid rgba(53, 109, 255, 0.18);
+        color: var(--accent);
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+
       button {
         appearance: none;
         border: none;
@@ -327,6 +429,9 @@ HTML = """<!doctype html>
         .shell { width: calc(100vw - 16px); margin: 8px auto; }
         .hero, .messages, .composer { padding-left: 16px; padding-right: 16px; }
         .message { max-width: 100%; }
+        .attachment-preview,
+        .attachment-preview.visible { grid-template-columns: 1fr; }
+        .attachment-preview img { width: 100%; height: auto; max-height: 240px; }
       }
     </style>
   </head>
@@ -339,8 +444,9 @@ HTML = """<!doctype html>
             <h1>Local Chat</h1>
             <p>
               A tiny browser chat app for local Apple Silicon inference. Pick a preset,
-              reload the active local weights on demand, and keep continuity through a
-              short carry-forward summary when you switch models.
+              reload the active local weights on demand, keep continuity through a
+              short carry-forward summary when you switch models, and drag in an image
+              when the selected preset supports vision.
             </p>
           </div>
           <a id="benchmarkLink" class="hero-link" href="#" target="_blank" rel="noreferrer">
@@ -375,10 +481,33 @@ HTML = """<!doctype html>
             placeholder="Ask your local model something. Shift+Enter adds a newline."
           ></textarea>
 
+          <div id="imageDropzone" class="dropzone">
+            <div class="dropzone-header">
+              <div>
+                <div class="dropzone-title">Image Attachment</div>
+                <div id="dropzoneCopy" class="dropzone-copy">
+                  Drag and drop one image here, or click to browse.
+                </div>
+              </div>
+              <div style="display:flex; gap:10px; flex-wrap:wrap;">
+                <button id="browseImageButton" class="secondary" type="button">Choose Image</button>
+                <button id="removeImageButton" class="secondary" type="button">Remove Image</button>
+              </div>
+            </div>
+            <input id="imageInput" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+            <div id="attachmentPreview" class="attachment-preview">
+              <img id="attachmentImage" alt="Attached preview" />
+              <div class="attachment-meta">
+                <div id="attachmentName" class="attachment-name"></div>
+                <div id="attachmentNote" class="attachment-note"></div>
+              </div>
+            </div>
+          </div>
+
           <div class="actions">
             <div class="hint">
               Enter sends. Shift+Enter adds a newline. Switching presets clears the visible
-              transcript and carries a short summary into the next turn.
+              transcript, carries a short summary into the next turn, and clears any attached image.
             </div>
             <div style="display:flex; gap:10px;">
               <button id="clearButton" class="secondary" type="button">Clear</button>
@@ -407,10 +536,21 @@ HTML = """<!doctype html>
       const presetSelectEl = document.getElementById("presetSelect");
       const benchmarkLinkEl = document.getElementById("benchmarkLink");
       const benchmarkLabelEl = document.getElementById("benchmarkLabel");
+      const imageDropzoneEl = document.getElementById("imageDropzone");
+      const dropzoneCopyEl = document.getElementById("dropzoneCopy");
+      const browseImageButtonEl = document.getElementById("browseImageButton");
+      const removeImageButtonEl = document.getElementById("removeImageButton");
+      const imageInputEl = document.getElementById("imageInput");
+      const attachmentPreviewEl = document.getElementById("attachmentPreview");
+      const attachmentImageEl = document.getElementById("attachmentImage");
+      const attachmentNameEl = document.getElementById("attachmentName");
+      const attachmentNoteEl = document.getElementById("attachmentNote");
 
       let chat = [];
       let conversationSummary = "";
       let currentPresetId = "";
+      let currentPresetSupportsImages = false;
+      let activeImage = null;
       let busy = false;
       let presetsLoaded = false;
 
@@ -432,6 +572,36 @@ HTML = """<!doctype html>
         }
       }
 
+      function updateAttachmentUI() {
+        const imagesEnabled = currentPresetSupportsImages && !busy;
+        imageDropzoneEl.classList.toggle("disabled", !currentPresetSupportsImages);
+        browseImageButtonEl.disabled = !imagesEnabled;
+        imageInputEl.disabled = !imagesEnabled;
+        removeImageButtonEl.disabled = busy || !activeImage;
+
+        if (activeImage) {
+          attachmentPreviewEl.classList.add("visible");
+          attachmentImageEl.src = activeImage.data_url;
+          attachmentNameEl.textContent = activeImage.name;
+          attachmentNoteEl.textContent = currentPresetSupportsImages
+            ? "This image stays attached for upcoming turns until you clear it or switch presets."
+            : "This image is attached, but the current preset is text-only. Switch to Qwen 3.5 or clear it.";
+        } else {
+          attachmentPreviewEl.classList.remove("visible");
+          attachmentImageEl.removeAttribute("src");
+          attachmentNameEl.textContent = "";
+          attachmentNoteEl.textContent = "";
+        }
+
+        if (currentPresetSupportsImages) {
+          dropzoneCopyEl.textContent = activeImage
+            ? "The current conversation image is ready. Drop a new one to replace it."
+            : "Drag and drop one image here, or click to browse.";
+        } else {
+          dropzoneCopyEl.textContent = "This preset is text-only. Switch to a Qwen 3.5 preset to use image chat.";
+        }
+      }
+
       function setBusy(nextBusy, label = "Ready") {
         busy = nextBusy;
         sendButton.disabled = nextBusy;
@@ -439,12 +609,21 @@ HTML = """<!doctype html>
         promptEl.disabled = nextBusy;
         presetSelectEl.disabled = nextBusy;
         statusEl.textContent = nextBusy ? label : "Ready";
+        updateAttachmentUI();
       }
 
-      function renderMessage(role, content) {
+      function renderMessage(role, content, options = {}) {
         const bubble = document.createElement("div");
         bubble.className = `message ${role}`;
-        bubble.textContent = content;
+        if (options.imageName) {
+          const imageNote = document.createElement("div");
+          imageNote.className = "message-image-note";
+          imageNote.textContent = `Image: ${options.imageName}`;
+          bubble.appendChild(imageNote);
+        }
+        const body = document.createElement("div");
+        body.textContent = content;
+        bubble.appendChild(body);
         messagesEl.appendChild(bubble);
         messagesEl.scrollTop = messagesEl.scrollHeight;
         return bubble;
@@ -461,20 +640,22 @@ HTML = """<!doctype html>
 
       function clearChat() {
         conversationSummary = "";
+        activeImage = null;
         resetVisibleChat(
-          "Conversation and carry-forward summary cleared. The current backend stays loaded."
+          "Conversation, image attachment, and carry-forward summary cleared. The current backend stays loaded."
         );
+        updateAttachmentUI();
       }
 
       function restoreMessages() {
         messagesEl.innerHTML = "";
         for (const item of chat) {
-          renderMessage(item.role, item.content);
+          renderMessage(item.role, item.content, { imageName: item.image_name || "" });
         }
         if (!chat.length) {
           renderMessage(
             "system",
-            "Connected. Pick a preset, send a prompt, and switch models whenever you want."
+            "Connected. Pick a preset, send a prompt, and use Qwen 3.5 if you want to drag in an image."
           );
         }
       }
@@ -496,7 +677,9 @@ HTML = """<!doctype html>
           for (const preset of items) {
             const option = document.createElement("option");
             option.value = preset.id;
-            option.textContent = `${preset.label} / ${preset.runtime_label}`;
+            option.textContent = preset.supports_images
+              ? `${preset.label} / ${preset.runtime_label} / Image chat`
+              : `${preset.label} / ${preset.runtime_label}`;
             optgroup.appendChild(option);
           }
           presetSelectEl.appendChild(optgroup);
@@ -510,10 +693,62 @@ HTML = """<!doctype html>
         modelEl.textContent = info.current_preset.label;
         statusEl.textContent = info.state === "ready" ? "Ready" : info.state;
         currentPresetId = info.current_preset.id;
+        currentPresetSupportsImages = Boolean(info.current_preset.supports_images);
         presetSelectEl.value = currentPresetId;
         benchmarkLinkEl.href = info.benchmark_url;
         benchmarkLabelEl.textContent = `Read the ${info.current_preset.family} benchmark post`;
+        updateAttachmentUI();
         persistState();
+      }
+
+      function clearActiveImage({ announce = false } = {}) {
+        if (!activeImage) return;
+        const clearedName = activeImage.name;
+        activeImage = null;
+        imageInputEl.value = "";
+        updateAttachmentUI();
+        if (announce) {
+          renderMessage("system", `Removed image attachment: ${clearedName}`);
+        }
+      }
+
+      function fileToDataUrl(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error("Failed to read the selected image"));
+          reader.readAsDataURL(file);
+        });
+      }
+
+      async function attachImageFile(file) {
+        if (!file) return;
+        if (!file.type || !file.type.startsWith("image/")) {
+          throw new Error("Only image files are supported");
+        }
+        if (!currentPresetSupportsImages) {
+          throw new Error("The current preset is text-only. Switch to a Qwen 3.5 preset to use images.");
+        }
+        const dataUrl = await fileToDataUrl(file);
+        activeImage = {
+          name: file.name || "image",
+          media_type: file.type,
+          data_url: dataUrl,
+        };
+        updateAttachmentUI();
+        renderMessage(
+          "system",
+          `Attached image: ${activeImage.name}. It will stay available for upcoming turns until you clear it or switch presets.`
+        );
+      }
+
+      async function handleSelectedFiles(files) {
+        if (!files || !files.length) return;
+        const firstFile = Array.from(files).find((file) => file.type && file.type.startsWith("image/"));
+        if (!firstFile) {
+          throw new Error("Drop or choose a JPEG, PNG, or WebP image");
+        }
+        await attachImageFile(firstFile);
       }
 
       async function loadInfo() {
@@ -538,11 +773,24 @@ HTML = """<!doctype html>
 
       async function sendPrompt() {
         if (busy) return;
-        const text = promptEl.value.trim();
+        if (activeImage && !currentPresetSupportsImages) {
+          renderMessage(
+            "system",
+            "The current preset is text-only. Switch to a Qwen 3.5 preset or remove the attached image."
+          );
+          return;
+        }
+
+        const rawText = promptEl.value.trim();
+        const text = rawText || (activeImage ? "Describe the attached image briefly." : "");
         if (!text) return;
 
-        renderMessage("user", text);
-        chat.push({ role: "user", content: text });
+        renderMessage("user", text, { imageName: activeImage ? activeImage.name : "" });
+        chat.push({
+          role: "user",
+          content: text,
+          image_name: activeImage ? activeImage.name : undefined,
+        });
         persistState();
         promptEl.value = "";
 
@@ -557,6 +805,7 @@ HTML = """<!doctype html>
               messages: chat,
               conversation_summary: conversationSummary,
               max_tokens: Number(maxTokensEl.value) || 512,
+              conversation_image: activeImage,
             }),
           });
           const data = await response.json();
@@ -591,6 +840,7 @@ HTML = """<!doctype html>
               preset_id: nextPresetId,
               messages: chat,
               conversation_summary: conversationSummary,
+              conversation_image: activeImage,
             }),
           });
           const data = await response.json();
@@ -599,15 +849,21 @@ HTML = """<!doctype html>
           }
 
           conversationSummary = data.conversation_summary || "";
+          const removedImageName = activeImage ? activeImage.name : "";
           chat = [];
+          activeImage = null;
+          imageInputEl.value = "";
           syncInfo(data);
           messagesEl.innerHTML = "";
           const summaryText = conversationSummary
             ? `Carry-forward summary:\\n${conversationSummary}`
             : "No summary was needed because there was no conversation context yet.";
+          const imageText = removedImageName
+            ? `\\n\\nAttached image cleared: ${removedImageName}`
+            : "";
           renderMessage(
             "system",
-            `Switched presets. Visible transcript cleared.\\n\\n${summaryText}`
+            `Switched presets. Visible transcript cleared.\\n\\n${summaryText}${imageText}`
           );
           persistState();
         } catch (error) {
@@ -621,8 +877,62 @@ HTML = """<!doctype html>
 
       sendButton.addEventListener("click", sendPrompt);
       clearButton.addEventListener("click", clearChat);
+      browseImageButtonEl.addEventListener("click", () => {
+        if (!busy && currentPresetSupportsImages) {
+          imageInputEl.click();
+        }
+      });
+      removeImageButtonEl.addEventListener("click", () => {
+        clearActiveImage({ announce: true });
+      });
+      imageInputEl.addEventListener("change", async (event) => {
+        try {
+          await handleSelectedFiles(event.target.files);
+        } catch (error) {
+          renderMessage("system", `Image attach failed: ${error.message}`);
+        } finally {
+          imageInputEl.value = "";
+        }
+      });
+      imageDropzoneEl.addEventListener("click", (event) => {
+        if (event.target.closest("button")) {
+          return;
+        }
+        if (!busy && currentPresetSupportsImages) {
+          imageInputEl.click();
+        }
+      });
       presetSelectEl.addEventListener("change", (event) => {
         switchPreset(event.target.value);
+      });
+      imageDropzoneEl.addEventListener("dragenter", (event) => {
+        if (!busy && currentPresetSupportsImages) {
+          event.preventDefault();
+          imageDropzoneEl.classList.add("active");
+        }
+      });
+      imageDropzoneEl.addEventListener("dragover", (event) => {
+        if (!busy && currentPresetSupportsImages) {
+          event.preventDefault();
+          imageDropzoneEl.classList.add("active");
+        }
+      });
+      imageDropzoneEl.addEventListener("dragleave", (event) => {
+        if (event.target === imageDropzoneEl) {
+          imageDropzoneEl.classList.remove("active");
+        }
+      });
+      imageDropzoneEl.addEventListener("drop", async (event) => {
+        imageDropzoneEl.classList.remove("active");
+        if (busy || !currentPresetSupportsImages) {
+          return;
+        }
+        event.preventDefault();
+        try {
+          await handleSelectedFiles(event.dataTransfer.files);
+        } catch (error) {
+          renderMessage("system", `Image attach failed: ${error.message}`);
+        }
       });
       promptEl.addEventListener("keydown", (event) => {
         if (event.key === "Enter" && !event.shiftKey) {
@@ -711,6 +1021,29 @@ class ChatHandler(BaseHTTPRequestHandler):
             raise ValueError("`conversation_summary` must be a string")
         return value
 
+    def _validate_conversation_image(
+        self,
+        payload: dict[str, Any],
+    ) -> ConversationImage | None:
+        value = payload.get("conversation_image")
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError("`conversation_image` must be an object")
+
+        name = value.get("name") or "image"
+        media_type = value.get("media_type")
+        data_url = value.get("data_url")
+        if not isinstance(name, str):
+            raise ValueError("`conversation_image.name` must be a string")
+        if not isinstance(media_type, str) or not media_type.startswith("image/"):
+            raise ValueError("`conversation_image.media_type` must be an image media type")
+        if media_type not in {"image/jpeg", "image/png", "image/webp"}:
+            raise ValueError("Only JPEG, PNG, and WebP images are supported")
+        if not isinstance(data_url, str) or not data_url.startswith("data:"):
+            raise ValueError("`conversation_image.data_url` must be a base64 data URL")
+        return ConversationImage(name=name.strip() or "image", media_type=media_type, data_url=data_url)
+
     def _info_payload(self) -> dict[str, Any]:
         snapshot = self.server.manager.snapshot()
         return {
@@ -737,6 +1070,7 @@ class ChatHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             messages = self._validate_messages(payload)
             conversation_summary = self._validate_summary(payload)
+            conversation_image = self._validate_conversation_image(payload)
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=400)
             return
@@ -748,6 +1082,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                     messages=messages,
                     conversation_summary=conversation_summary,
                     max_tokens=max_tokens,
+                    conversation_image=conversation_image,
                 )
             except Exception as exc:  # noqa: BLE001
                 self._send_json({"error": str(exc)}, status=500)
@@ -765,6 +1100,7 @@ class ChatHandler(BaseHTTPRequestHandler):
                 preset_id=preset_id,
                 messages=messages,
                 conversation_summary=conversation_summary,
+                conversation_image=conversation_image,
             )
         except Exception as exc:  # noqa: BLE001
             self._send_json({"error": str(exc)}, status=500)
@@ -784,34 +1120,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--runtime",
         choices=["mlx", "llama"],
         default=None,
-        help="Legacy Gemma-only runtime alias",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--model",
         default=None,
-        help=f"Legacy Gemma-only model alias ({runtime_model_help()})",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8099)
     parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     parser.add_argument("--system-prompt", default=None)
     parser.add_argument("--open-browser", action="store_true")
-    parser.add_argument(
-        "--llama-url",
-        default=None,
-        help="Existing llama-server URL, for example http://127.0.0.1:8080",
-    )
-    parser.add_argument(
-        "--no-auto-start-llama",
-        action="store_true",
-        help="Use an existing llama-server instead of starting one",
-    )
-    parser.add_argument("--llama-port", type=int, default=18080)
     parser.add_argument("--ctx-size", type=int, default=16384)
     parser.add_argument(
         "--model-cache-dir",
         default=None,
-        help="Cache root for downloaded model artifacts. Defaults to a sibling `models/` directory.",
+        help="Cache root for downloaded model artifacts. Defaults to `~/.cache`.",
     )
     parser.add_argument("--list-presets", action="store_true")
     return parser
@@ -834,10 +1159,7 @@ def main() -> int:
     model_cache_dir = configure_model_cache(args.model_cache_dir)
     settings = BackendFactorySettings(
         system_prompt=args.system_prompt or "You are a concise, helpful assistant. Answer directly and clearly.",
-        llama_url=args.llama_url,
-        auto_start_llama=not args.no_auto_start_llama,
         ctx_size=args.ctx_size,
-        llama_port=args.llama_port,
         model_cache_dir=str(model_cache_dir),
     )
     manager = BackendManager(initial_preset=initial_preset, settings=settings)

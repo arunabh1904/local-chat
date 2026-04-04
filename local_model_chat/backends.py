@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import gc
 import json
 import os
 import signal
 import subprocess
+import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -58,6 +62,13 @@ class CompletionResult:
     metrics: CompletionMetrics
 
 
+@dataclass(frozen=True)
+class ConversationImage:
+    name: str
+    media_type: str
+    data_url: str
+
+
 def log(message: str) -> None:
     print(f"[local-chat] {message}", flush=True)
 
@@ -93,34 +104,83 @@ def cleanup_process(proc: subprocess.Popen[Any] | None) -> None:
         proc.wait(timeout=20)
 
 
-def _serialize_messages(messages: list[dict[str, str]]) -> str:
+def _serialize_messages(
+    messages: list[dict[str, str]],
+    conversation_image: ConversationImage | None = None,
+) -> str:
     if not messages:
-        return "(no recent messages)"
-    return "\n\n".join(
+        transcript = "(no recent messages)"
+    else:
+        transcript = "\n\n".join(
         f"{item['role'].upper()}:\n{item['content'].strip()}" for item in messages
     )
+    if conversation_image is None:
+        return transcript
+    return (
+        f"[Attached image: {conversation_image.name or 'unnamed image'}]\n\n"
+        f"{transcript}"
+    )
+
+
+def _messages_with_optional_image(
+    messages: list[dict[str, str]],
+    conversation_image: ConversationImage | None,
+) -> list[dict[str, Any]]:
+    rendered_messages: list[dict[str, Any]] = [dict(item) for item in messages]
+    if conversation_image is None:
+        return rendered_messages
+
+    for index in range(len(rendered_messages) - 1, -1, -1):
+        item = rendered_messages[index]
+        if item["role"] != "user":
+            continue
+        item["content"] = [
+            {"type": "image"},
+            {"type": "text", "text": item["content"]},
+        ]
+        return rendered_messages
+
+    rendered_messages.append(
+        {
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": "Describe the attached image briefly."},
+            ],
+        }
+    )
+    return rendered_messages
 
 
 def build_chat_messages(
     system_prompt: str,
     conversation_summary: str,
     messages: list[dict[str, str]],
-) -> list[dict[str, str]]:
+    conversation_image: ConversationImage | None = None,
+) -> list[dict[str, Any]]:
     system_parts = [system_prompt.strip()]
     if conversation_summary.strip():
         system_parts.append(
             "Carry forward this prior conversation summary when responding:\n"
             f"{conversation_summary.strip()}"
         )
-    return [{"role": "system", "content": "\n\n".join(system_parts)}, *messages]
+    if conversation_image is not None:
+        system_parts.append(
+            "The current turn includes one attached image. Use it alongside the text."
+        )
+    return [
+        {"role": "system", "content": "\n\n".join(system_parts)},
+        *_messages_with_optional_image(messages, conversation_image),
+    ]
 
 
 def build_summary_messages(
     conversation_summary: str,
     messages: list[dict[str, str]],
-) -> list[dict[str, str]]:
+    conversation_image: ConversationImage | None = None,
+) -> list[dict[str, Any]]:
     prior_summary = conversation_summary.strip() or "(none)"
-    transcript = _serialize_messages(messages)
+    transcript = _serialize_messages(messages, conversation_image)
     prompt = (
         "Write a concise carry-forward summary for a model switch.\n\n"
         f"Existing summary:\n{prior_summary}\n\n"
@@ -128,10 +188,71 @@ def build_summary_messages(
         "Return a short paragraph. Mention the user's goal, constraints, "
         "important factual context, and the most recent unfinished thread."
     )
+    user_message: dict[str, Any]
+    if conversation_image is None:
+        user_message = {"role": "user", "content": prompt}
+    else:
+        user_message = {
+            "role": "user",
+            "content": [
+                {"type": "image"},
+                {"type": "text", "text": prompt},
+            ],
+        }
     return [
         {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
-        {"role": "user", "content": prompt},
+        user_message,
     ]
+
+
+def _image_suffix(conversation_image: ConversationImage) -> str:
+    media_type = conversation_image.media_type.lower()
+    if media_type == "image/jpeg":
+        return ".jpg"
+    if media_type == "image/png":
+        return ".png"
+    if media_type == "image/webp":
+        return ".webp"
+    raise ValueError(f"Unsupported image media type `{conversation_image.media_type}`")
+
+
+def _decode_image_bytes(conversation_image: ConversationImage) -> bytes:
+    prefix = f"data:{conversation_image.media_type};base64,"
+    if not conversation_image.data_url.startswith(prefix):
+        raise ValueError("Image payload must be a base64 data URL")
+    payload = conversation_image.data_url.removeprefix(prefix)
+    try:
+        return base64.b64decode(payload, validate=True)
+    except binascii.Error as exc:
+        raise ValueError("Image payload is not valid base64") from exc
+
+
+@contextmanager
+def materialize_conversation_image(
+    conversation_image: ConversationImage | None,
+) -> Any:
+    if conversation_image is None:
+        yield None
+        return
+
+    image_bytes = _decode_image_bytes(conversation_image)
+    suffix = _image_suffix(conversation_image)
+    temp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="local-chat-image-",
+            suffix=suffix,
+            delete=False,
+        ) as handle:
+            handle.write(image_bytes)
+            temp_path = handle.name
+        yield temp_path
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
 
 
 def _chat_template_target(processor_or_tokenizer: Any) -> Any:
@@ -163,8 +284,9 @@ class Backend:
 
     def generate(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         max_tokens: int,
+        conversation_image: ConversationImage | None = None,
     ) -> CompletionResult:
         raise NotImplementedError
 
@@ -194,9 +316,14 @@ class MLXLMBackend(Backend):
 
     def generate(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         max_tokens: int,
+        conversation_image: ConversationImage | None = None,
     ) -> CompletionResult:
+        if conversation_image is not None:
+            raise RuntimeError(
+                f"{self.display_model} is text-only. Switch to a Qwen 3.5 preset to use image chat."
+            )
         rendered_prompt = _render_prompt(
             self.tokenizer,
             messages,
@@ -266,8 +393,9 @@ class MLXVLMBackend(Backend):
 
     def generate(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         max_tokens: int,
+        conversation_image: ConversationImage | None = None,
     ) -> CompletionResult:
         rendered_prompt = _render_prompt(
             self.processor,
@@ -278,22 +406,23 @@ class MLXVLMBackend(Backend):
         first_token_at: float | None = None
         last_chunk: Any | None = None
         started = time.perf_counter()
-        with self.lock:
-            for chunk in self.stream_generate(
-                self.model,
-                self.processor,
-                prompt=rendered_prompt,
-                image=None,
-                audio=None,
-                max_tokens=max_tokens,
-                temperature=0.0,
-                top_p=1.0,
-            ):
-                last_chunk = chunk
-                if chunk.text:
-                    if first_token_at is None:
-                        first_token_at = time.perf_counter()
-                    pieces.append(chunk.text)
+        with materialize_conversation_image(conversation_image) as image_path:
+            with self.lock:
+                for chunk in self.stream_generate(
+                    self.model,
+                    self.processor,
+                    prompt=rendered_prompt,
+                    image=image_path,
+                    audio=None,
+                    max_tokens=max_tokens,
+                    temperature=0.0,
+                    top_p=1.0,
+                ):
+                    last_chunk = chunk
+                    if chunk.text:
+                        if first_token_at is None:
+                            first_token_at = time.perf_counter()
+                        pieces.append(chunk.text)
         finished = time.perf_counter()
         text = "".join(pieces).strip()
         generation_tokens = getattr(last_chunk, "generation_tokens", None)
@@ -382,7 +511,7 @@ class LlamaCppBackend(Backend):
 
     def _build_payload(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         max_tokens: int,
         *,
         stream: bool,
@@ -418,7 +547,7 @@ class LlamaCppBackend(Backend):
 
     def _nonstream_request(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         max_tokens: int,
     ) -> tuple[str, dict[str, Any], float]:
         started = time.perf_counter()
@@ -435,9 +564,14 @@ class LlamaCppBackend(Backend):
 
     def generate(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         max_tokens: int,
+        conversation_image: ConversationImage | None = None,
     ) -> CompletionResult:
+        if conversation_image is not None:
+            raise RuntimeError(
+                f"{self.display_model} is text-only. Switch to a Qwen 3.5 preset to use image chat."
+            )
         text, usage, total_time = self._nonstream_request(messages, max_tokens)
         generation_tokens = usage.get("completion_tokens")
         metrics = CompletionMetrics(
@@ -453,7 +587,7 @@ class LlamaCppBackend(Backend):
 
     def benchmark(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         max_tokens: int,
     ) -> CompletionResult:
         pieces: list[str] = []
@@ -567,6 +701,7 @@ class BackendManager:
         messages: list[dict[str, str]],
         conversation_summary: str,
         max_tokens: int,
+        conversation_image: ConversationImage | None = None,
     ) -> CompletionResult:
         with self.lock:
             backend = self._require_backend()
@@ -574,10 +709,13 @@ class BackendManager:
                 self.settings.system_prompt,
                 conversation_summary,
                 messages,
+                conversation_image,
             )
-            if isinstance(backend, LlamaCppBackend):
-                return backend.generate(full_messages, max_tokens=max_tokens)
-            return backend.generate(full_messages, max_tokens=max_tokens)
+            return backend.generate(
+                full_messages,
+                max_tokens=max_tokens,
+                conversation_image=conversation_image,
+            )
 
     def benchmark(
         self,
@@ -599,6 +737,7 @@ class BackendManager:
         preset_id: str,
         messages: list[dict[str, str]],
         conversation_summary: str,
+        conversation_image: ConversationImage | None = None,
     ) -> str:
         target_preset = get_preset(preset_id)
         with self.lock:
@@ -608,8 +747,20 @@ class BackendManager:
 
             if messages or conversation_summary.strip():
                 summary_result = backend.generate(
-                    build_summary_messages(conversation_summary, messages),
+                    build_summary_messages(
+                        conversation_summary,
+                        messages,
+                        conversation_image,
+                    ),
                     max_tokens=SUMMARY_MAX_TOKENS,
+                    conversation_image=conversation_image,
+                )
+                carried_summary = summary_result.text.strip()
+            elif conversation_image is not None:
+                summary_result = backend.generate(
+                    build_summary_messages("", [], conversation_image),
+                    max_tokens=SUMMARY_MAX_TOKENS,
+                    conversation_image=conversation_image,
                 )
                 carried_summary = summary_result.text.strip()
             else:

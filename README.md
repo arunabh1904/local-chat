@@ -9,13 +9,10 @@ The GitHub repo is now `local-chat`, and the app itself is branded as `Local Cha
 It currently supports:
 
 - `Gemma 4` on `MLX`
-- `Gemma 4` on `llama.cpp`
-- `Qwen 3.5` on `MLX` via `mlx-vlm` in text-only mode
-- `Qwen 3.5` on `llama.cpp`
+- `Qwen 3.5` on `MLX` with image chat support
 - `Qwen 3` on `MLX`
-- `Qwen 3` on `llama.cpp`
 
-The UI stays intentionally small. Chat history lives in the browser session, and switching presets clears the visible transcript while carrying a short summary forward into the next model.
+The UI stays intentionally small. Chat history lives in the browser session, and switching presets clears the visible transcript while carrying a short summary forward into the next model. Qwen 3.5 presets also let you drag and drop one image into the active conversation.
 
 Model artifacts are cached on disk under `~/.cache` by default, so preset switches reuse the shared Hugging Face downloads you already have instead of fetching them again. The reload still has to happen in memory because only one large local model stays active at a time.
 
@@ -44,7 +41,9 @@ Override the cache location if you want:
 ## What Changed
 
 - One dropdown now lists supported local presets.
+- The app now uses one MLX-first serving path per model instead of duplicating MLX and `llama.cpp` presets.
 - Changing the dropdown triggers a backend reload and weight swap.
+- Qwen 3.5 presets now support drag-and-drop image chat in the browser UI.
 - Downloaded weights now default to the shared `~/.cache` Hugging Face cache root.
 - The server exposes preset metadata through `/api/info`.
 - Qwen benchmark automation now lives in `benchmark_local_models.py`.
@@ -66,9 +65,9 @@ Useful starting points:
 - `gemma4-26b-a4b-mlx`
 - `gemma4-31b-mlx`
 - `qwen35-9b-mlx`
-- `qwen35-35b-a3b-llama`
+- `qwen35-35b-a3b-mlx`
 - `qwen3-14b-mlx`
-- `qwen3-32b-llama`
+- `qwen3-32b-mlx`
 
 ## Benchmarking
 
@@ -83,7 +82,7 @@ Run the default Qwen matrix:
 Run a smaller slice:
 
 ```bash
-./.venv/bin/python benchmark_local_models.py --preset qwen35-4b-mlx --preset qwen3-14b-llama --suite short
+./.venv/bin/python benchmark_local_models.py --preset qwen35-4b-mlx --preset qwen3-14b-mlx --suite short
 ```
 
 Use a custom cache root for benchmark runs:
@@ -96,8 +95,8 @@ Results are written under `benchmarks/results/` as JSON and Markdown.
 
 ## Notes
 
-- `setup.sh` installs `mlx-lm`, `mlx-vlm`, plus `torch` and `torchvision`, because Qwen 3.5 MLX presets still instantiate the upstream Qwen3-VL processor stack even in text-only mode.
-- The app is text-only in this pass. Qwen 3.5 is served without images.
+- `setup.sh` installs `mlx-lm`, `mlx-vlm`, plus `torch` and `torchvision`, because Qwen 3.5 MLX presets use the upstream Qwen3-VL processor stack for image chat.
+- Qwen 3.5 presets support one active dragged or selected image at a time. The attachment is cleared when you clear the chat or switch presets.
 - The first load for any preset can take a while because weights download on demand.
 - By default, downloads now reuse the shared cache under `~/.cache/huggingface`.
 - After the first download, preset switches reuse the on-disk cache and only pay the weight unload/reload cost in memory.
@@ -114,12 +113,8 @@ Results are written under `benchmarks/results/` as JSON and Markdown.
 Useful flags:
 
 - `--preset <preset-id>`
-- `--runtime mlx|llama`
-- `--model e2b|e4b|26b|31b`
 - `--port 8099`
 - `--max-tokens 512`
 - `--open-browser`
 - `--system-prompt "You are a concise assistant."`
-- `--no-auto-start-llama`
-- `--llama-url http://127.0.0.1:8080`
 - `--model-cache-dir /Users/arunabhmishra/.cache`
