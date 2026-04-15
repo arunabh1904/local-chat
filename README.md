@@ -16,6 +16,8 @@ The UI stays intentionally small. Chat history lives in the browser session, and
 
 Model artifacts are cached on disk under `~/.cache` by default, so preset switches reuse the shared Hugging Face downloads you already have instead of fetching them again. The reload still has to happen in memory because only one large local model stays active at a time.
 
+`./run.sh` starts the same app every time: Gemma 4 26B A4B is the default text model, and image turns automatically route to Qwen 3.5 9B, the largest cached MLX vision preset used by this repo. On a fresh machine, the browser shows whether the active model is being downloaded into the cache or loaded from the cache.
+
 ## Quick Start
 
 ```bash
@@ -36,6 +38,12 @@ Override the cache location if you want:
 
 ```bash
 ./run.sh --model-cache-dir /Users/arunabhmishra/.cache --preset qwen3-14b-mlx
+```
+
+Override the automatic vision route if needed:
+
+```bash
+./run.sh --vision-preset qwen35-9b-mlx
 ```
 
 ## What Changed
@@ -82,7 +90,7 @@ Run the default Qwen matrix:
 Run a smaller slice:
 
 ```bash
-./.venv/bin/python benchmark_local_models.py --preset qwen35-4b-mlx --preset qwen3-14b-mlx --suite short
+./.venv/bin/python benchmark_local_models.py --preset qwen35-9b-mlx --suite short --suite long
 ```
 
 Use a custom cache root for benchmark runs:
@@ -113,6 +121,7 @@ Results are written under `benchmarks/results/` as JSON and Markdown.
 Useful flags:
 
 - `--preset <preset-id>`
+- `--vision-preset <preset-id>`
 - `--port 8099`
 - `--max-tokens 512`
 - `--open-browser`

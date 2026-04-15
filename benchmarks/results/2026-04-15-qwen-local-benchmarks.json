@@ -1,0 +1,57 @@
+{
+  "meta": {
+    "date": "2026-04-15",
+    "platform": "macOS-26.3.1-arm64-arm-64bit",
+    "machine": "Darwin Arunabhs-MacBook-Pro.local 25.3.0 Darwin Kernel Version 25.3.0: Wed Jan 28 20:54:38 PST 2026; root:xnu-12377.91.3~2/RELEASE_ARM64_T6050 arm64",
+    "cpu": "Apple M5 Max",
+    "memory_bytes": "68719476736",
+    "excluded_models": [
+      "Qwen3.5-122B-A10B",
+      "Qwen3.5-397B-A17B",
+      "Qwen3-235B-A22B"
+    ],
+    "note": "As of this benchmark date, the official local/open comparison covers Qwen 3.5 and Qwen 3 because no official Qwen 3.6 local model target was found."
+  },
+  "runs": [
+    {
+      "preset_id": "qwen35-9b-mlx",
+      "family": "Qwen 3.5",
+      "label": "Qwen 3.5 9B",
+      "runtime": "mlx",
+      "artifact": "mlx-community/Qwen3.5-9B-MLX-4bit",
+      "suite": "long",
+      "target_prompt_tokens": 8192,
+      "max_tokens": 96,
+      "status": "ok",
+      "reply_preview": "1. Local inference on Apple Silicon favors deterministic prompts.\n2. Boring prompts are optimal for local inference perf",
+      "prompt_tokens": 8126,
+      "generation_tokens": 96,
+      "ttft_ms": 2792.5371669989545,
+      "decode_tokens_per_s": 87.61552636422812,
+      "average_tokens_per_s": 24.804066977785702,
+      "prompt_tokens_per_s": 2943.9589019517234,
+      "peak_memory_gb": 8.394564366,
+      "error": null
+    },
+    {
+      "preset_id": "qwen35-9b-mlx",
+      "family": "Qwen 3.5",
+      "label": "Qwen 3.5 9B",
+      "runtime": "mlx",
+      "artifact": "mlx-community/Qwen3.5-9B-MLX-4bit",
+      "suite": "short",
+      "target_prompt_tokens": 512,
+      "max_tokens": 192,
+      "status": "ok",
+      "reply_preview": "1. Apple Silicon inference favors deterministic prompts.\n2. Boring prompts improve local inference performance.\n3. Easy-",
+      "prompt_tokens": 538,
+      "generation_tokens": 131,
+      "ttft_ms": 310.165542003233,
+      "decode_tokens_per_s": 91.13145970267843,
+      "average_tokens_per_s": 75.75009033173569,
+      "prompt_tokens_per_s": 1891.2598760338017,
+      "peak_memory_gb": 7.074623478,
+      "error": null
+    }
+  ]
+}
