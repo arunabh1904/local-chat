@@ -180,7 +180,7 @@ class LocalModelChatTests(unittest.TestCase):
             self.assertGreater(len(payload["presets"]), 1)
             self.assertIn("model_cache_dir", payload)
             self.assertTrue(payload["image_chat_available"])
-            self.assertEqual(payload["vision_preset"]["id"], "qwen35-9b-mlx")
+            self.assertEqual(payload["vision_preset"]["id"], "qwen35-35b-a3b-mlx")
             self.assertFalse(payload["current_preset"]["supports_images"])
             self.assertTrue(any(item["supports_images"] for item in payload["presets"]))
 
@@ -205,7 +205,7 @@ class LocalModelChatTests(unittest.TestCase):
                 payload = json.loads(response.read().decode("utf-8"))
             self.assertIn("hello", payload["reply"])
             self.assertIn("tiny.png", payload["reply"])
-            self.assertEqual(payload["current_preset"]["id"], "qwen35-9b-mlx")
+            self.assertEqual(payload["current_preset"]["id"], "qwen35-35b-a3b-mlx")
 
             mismatched_image_request = Request(
                 f"{base_url}/api/chat",

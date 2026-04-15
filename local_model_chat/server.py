@@ -170,18 +170,33 @@ HTML = """<!doctype html>
 
       .notice {
         display: none;
-        padding: 12px 14px;
-        border: 1px solid var(--line);
-        border-radius: 14px;
-        background: rgba(248, 251, 255, 0.92);
-        color: var(--muted);
-        font-size: 14px;
+        padding: 18px 20px;
+        border: 2px solid var(--line-strong);
+        border-radius: 16px;
+        background: rgba(248, 251, 255, 0.96);
+        color: var(--text);
+        font-size: 16px;
+        font-weight: 700;
         line-height: 1.5;
         font-family: var(--font-reading);
+        box-shadow: 0 16px 36px rgba(53, 85, 150, 0.14);
       }
 
       .notice.visible {
         display: block;
+      }
+
+      .notice.downloading {
+        background: #fee2e2;
+        border-color: #b91c1c;
+        color: #7f1d1d;
+        box-shadow: 0 18px 42px rgba(185, 28, 28, 0.2);
+      }
+
+      .notice.error {
+        background: #fecaca;
+        border-color: #991b1b;
+        color: #7f1d1d;
       }
 
       .chat {
@@ -461,11 +476,10 @@ HTML = """<!doctype html>
           <div>
             <h1>Local Chat</h1>
             <p>
-              A tiny browser chat app for local Apple Silicon inference. Pick a preset,
-              reload the active local weights on demand, keep continuity through a
-              short carry-forward summary when you switch models, and drag in an image.
-              Image turns automatically use the configured vision preset when the active
-              text model cannot see images.
+              A tiny browser chat app for local Apple Silicon inference. It starts on the
+              largest cached Qwen vision preset by default, handles text and image turns
+              in one model, and keeps continuity through a short carry-forward summary
+              when you switch presets.
             </p>
           </div>
           <a id="benchmarkLink" class="hero-link" href="#" target="_blank" rel="noreferrer">
@@ -665,7 +679,9 @@ HTML = """<!doctype html>
         if (imageChatAvailable) {
           dropzoneCopyEl.textContent = activeImage
             ? "The current conversation image is ready. Drop a new one to replace it."
-            : `Drag and drop one image here. Text uses the active model; images use ${visionPresetLabel} when needed.`;
+            : currentPresetSupportsImages
+              ? "Drag and drop one image here. The active model handles text and images."
+              : `Drag and drop one image here. Text uses the active model; images use ${visionPresetLabel} when needed.`;
         } else {
           dropzoneCopyEl.textContent = "Image chat is unavailable because no vision preset is configured.";
         }
@@ -748,7 +764,9 @@ HTML = """<!doctype html>
         if (!chat.length) {
           renderMessage(
             "system",
-            "Connected. Text starts on Gemma 4 26B by default. You can also drag in an image; image turns use the configured vision preset when needed."
+            currentPresetSupportsImages
+              ? "Connected. The default Qwen model handles text and images; drag in an image whenever you need vision."
+              : "Connected. Text uses the active model, and image turns use the configured vision preset when needed."
           );
         }
       }
@@ -793,8 +811,12 @@ HTML = """<!doctype html>
         presetSelectEl.value = currentPresetId;
         benchmarkLinkEl.href = info.benchmark_url;
         benchmarkLabelEl.textContent = `Read the ${info.current_preset.family} benchmark post`;
-        cacheNoticeEl.textContent = info.cache_notice || "";
-        cacheNoticeEl.classList.toggle("visible", Boolean(info.cache_notice));
+        const cacheNotice = info.cache_notice || "";
+        const cacheNoticeKind = cacheNotice.toLowerCase();
+        cacheNoticeEl.textContent = cacheNotice;
+        cacheNoticeEl.classList.toggle("visible", Boolean(cacheNotice));
+        cacheNoticeEl.classList.toggle("downloading", cacheNoticeKind.startsWith("downloading"));
+        cacheNoticeEl.classList.toggle("error", cacheNoticeKind.startsWith("failed"));
         updateAttachmentUI();
         persistState();
       }

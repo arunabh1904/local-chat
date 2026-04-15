@@ -15,10 +15,12 @@ As of this benchmark date, the official local/open comparison covers Qwen 3.5 an
 
 | Preset | Runtime | Status | TTFT ms | Decode tok/s | Avg tok/s | Prompt tok | Gen tok | Notes |
 | ------ | ------- | ------ | ------- | ------------ | --------- | ---------- | ------- | ----- |
+| `Qwen 3.5 35B A3B` | mlx | ok | 2064 | 121.56 | 37.87 | 538 | 112 | 1. The notes mention Apple Silicon. 2. Local inference is discussed. 3. Prompts should be deterministic. 4. Prompts shou |
 | `Qwen 3.5 9B` | mlx | ok | 310 | 91.13 | 75.75 | 538 | 131 | 1. Apple Silicon inference favors deterministic prompts. 2. Boring prompts improve local inference performance. 3. Easy- |
 
 ## Long suite
 
 | Preset | Runtime | Status | TTFT ms | Decode tok/s | Avg tok/s | Prompt tok | Gen tok | Notes |
 | ------ | ------- | ------ | ------- | ------------ | --------- | ---------- | ------- | ----- |
+| `Qwen 3.5 35B A3B` | mlx | ok | 2660 | 114.68 | 27.61 | 8126 | 96 | 1. The background notes repeat the same text 128 times. 2. Local inference on Apple Silicon is the primary subject. 3. D |
 | `Qwen 3.5 9B` | mlx | ok | 2793 | 87.62 | 24.80 | 8126 | 96 | 1. Local inference on Apple Silicon favors deterministic prompts. 2. Boring prompts are optimal for local inference perf |

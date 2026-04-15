@@ -16,14 +16,14 @@ The UI stays intentionally small. Chat history lives in the browser session, and
 
 Model artifacts are cached on disk under `~/.cache` by default, so preset switches reuse the shared Hugging Face downloads you already have instead of fetching them again. The reload still has to happen in memory because only one large local model stays active at a time.
 
-`./run.sh` starts the same app every time: Gemma 4 26B A4B is the default text model, and image turns automatically route to Qwen 3.5 9B, the largest cached MLX vision preset used by this repo. On a fresh machine, the browser shows whether the active model is being downloaded into the cache or loaded from the cache.
+`./run.sh` starts the same app every time: Qwen 3.5 35B A3B is the default model for both text and images. It is the largest cached MLX Qwen vision preset used by this repo, and it fits on the target Apple Silicon machine. On a fresh machine, the browser shows a prominent red banner while the active model is downloading into the cache.
 
 ## Quick Start
 
 ```bash
 cd /Users/arunabhmishra/Code/local-chat
 ./setup.sh
-./run.sh --preset gemma4-26b-a4b-mlx --open-browser
+./run.sh --open-browser
 ```
 
 Then open [http://127.0.0.1:8099](http://127.0.0.1:8099).
@@ -31,7 +31,7 @@ Then open [http://127.0.0.1:8099](http://127.0.0.1:8099).
 If you want the direct entrypoint instead of `run.sh`, use:
 
 ```bash
-./.venv/bin/python local_chat.py --preset gemma4-26b-a4b-mlx
+./.venv/bin/python local_chat.py --preset qwen35-35b-a3b-mlx --vision-preset qwen35-35b-a3b-mlx
 ```
 
 Override the cache location if you want:
@@ -90,7 +90,7 @@ Run the default Qwen matrix:
 Run a smaller slice:
 
 ```bash
-./.venv/bin/python benchmark_local_models.py --preset qwen35-9b-mlx --suite short --suite long
+./.venv/bin/python benchmark_local_models.py --preset qwen35-35b-a3b-mlx --suite short --suite long
 ```
 
 Use a custom cache root for benchmark runs:
@@ -100,6 +100,13 @@ Use a custom cache root for benchmark runs:
 ```
 
 Results are written under `benchmarks/results/` as JSON and Markdown.
+
+The April 15 benchmark includes the default Qwen 3.5 35B A3B route:
+
+| Preset | Suite | TTFT ms | Decode tok/s | Avg tok/s |
+| ------ | ----- | ------- | ------------ | --------- |
+| `Qwen 3.5 35B A3B` | short | 2064 | 121.56 | 37.87 |
+| `Qwen 3.5 35B A3B` | long | 2660 | 114.68 | 27.61 |
 
 ## Notes
 
