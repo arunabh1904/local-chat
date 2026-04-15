@@ -5,8 +5,8 @@ from typing import Any
 
 
 SYSTEM_PROMPT = "You are a concise, helpful assistant. Answer directly and clearly."
-DEFAULT_PRESET_ID = "gemma4-26b-a4b-mlx"
-DEFAULT_VISION_PRESET_ID = "qwen35-9b-mlx"
+DEFAULT_PRESET_ID = "qwen35-35b-a3b-mlx"
+DEFAULT_VISION_PRESET_ID = "qwen35-35b-a3b-mlx"
 GEMMA_BENCHMARK_URL = (
     "https://arunabh1904.github.io/blog/2026/04/04/"
     "running-gemma-4-locally-on-a-64-gb-macbook-pro.html"
