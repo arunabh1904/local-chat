@@ -10,6 +10,8 @@ from typing import Any
 from .backends import BackendManager, BackendFactorySettings, ConversationImage
 from .model_cache import configure_model_cache
 from .presets import (
+    DEFAULT_PRESET_ID,
+    DEFAULT_VISION_PRESET_ID,
     all_presets,
     get_preset,
     resolve_initial_preset_id,
@@ -164,6 +166,22 @@ HTML = """<!doctype html>
         display: flex;
         flex-wrap: wrap;
         gap: 10px;
+      }
+
+      .notice {
+        display: none;
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: rgba(248, 251, 255, 0.92);
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.5;
+        font-family: var(--font-reading);
+      }
+
+      .notice.visible {
+        display: block;
       }
 
       .chat {
@@ -445,8 +463,9 @@ HTML = """<!doctype html>
             <p>
               A tiny browser chat app for local Apple Silicon inference. Pick a preset,
               reload the active local weights on demand, keep continuity through a
-              short carry-forward summary when you switch models, and drag in an image
-              when the selected preset supports vision.
+              short carry-forward summary when you switch models, and drag in an image.
+              Image turns automatically use the configured vision preset when the active
+              text model cannot see images.
             </p>
           </div>
           <a id="benchmarkLink" class="hero-link" href="#" target="_blank" rel="noreferrer">
@@ -459,6 +478,7 @@ HTML = """<!doctype html>
           <div class="pill"><strong>Model</strong> <span id="model">Loading...</span></div>
           <div class="pill"><strong>Status</strong> <span id="status">Starting up</span></div>
         </div>
+        <div id="cacheNotice" class="notice"></div>
       </section>
 
       <section class="chat">
@@ -524,6 +544,21 @@ HTML = """<!doctype html>
         summary: "local-chat:summary",
         preset: "local-chat:preset",
       };
+      const INFO_TIMEOUT_MS = 8000;
+      const INFO_RETRY_ATTEMPTS = 4;
+      const INFO_RETRY_DELAY_MS = 700;
+      const CHAT_TIMEOUT_MS = 60 * 60 * 1000;
+      const SUPPORTED_IMAGE_TYPES = new Map([
+        ["image/jpeg", "JPEG"],
+        ["image/png", "PNG"],
+        ["image/webp", "WebP"],
+      ]);
+      const IMAGE_TYPE_BY_EXTENSION = new Map([
+        ["jpg", "image/jpeg"],
+        ["jpeg", "image/jpeg"],
+        ["png", "image/png"],
+        ["webp", "image/webp"],
+      ]);
 
       const messagesEl = document.getElementById("messages");
       const promptEl = document.getElementById("prompt");
@@ -531,6 +566,7 @@ HTML = """<!doctype html>
       const clearButton = document.getElementById("clearButton");
       const maxTokensEl = document.getElementById("maxTokens");
       const statusEl = document.getElementById("status");
+      const cacheNoticeEl = document.getElementById("cacheNotice");
       const runtimeEl = document.getElementById("runtime");
       const modelEl = document.getElementById("model");
       const presetSelectEl = document.getElementById("presetSelect");
@@ -550,9 +586,42 @@ HTML = """<!doctype html>
       let conversationSummary = "";
       let currentPresetId = "";
       let currentPresetSupportsImages = false;
+      let imageChatAvailable = false;
+      let visionPresetLabel = "the vision preset";
+      let modelCacheDir = "";
       let activeImage = null;
       let busy = false;
       let presetsLoaded = false;
+      let messagesRestored = false;
+
+      function delay(ms) {
+        return new Promise((resolve) => window.setTimeout(resolve, ms));
+      }
+
+      async function fetchJson(url, options = {}, timeoutMs = CHAT_TIMEOUT_MS) {
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const response = await fetch(url, { ...options, signal: controller.signal });
+          let data = {};
+          try {
+            data = await response.json();
+          } catch (_) {
+            data = {};
+          }
+          if (!response.ok) {
+            throw new Error(data.error || `Request failed with HTTP ${response.status}`);
+          }
+          return data;
+        } catch (error) {
+          if (error.name === "AbortError") {
+            throw new Error("The local server did not respond before the request timed out");
+          }
+          throw error;
+        } finally {
+          window.clearTimeout(timeoutId);
+        }
+      }
 
       function readStoredJson(key, fallback) {
         const raw = sessionStorage.getItem(key);
@@ -573,8 +642,8 @@ HTML = """<!doctype html>
       }
 
       function updateAttachmentUI() {
-        const imagesEnabled = currentPresetSupportsImages && !busy;
-        imageDropzoneEl.classList.toggle("disabled", !currentPresetSupportsImages);
+        const imagesEnabled = imageChatAvailable && !busy;
+        imageDropzoneEl.classList.toggle("disabled", !imageChatAvailable);
         browseImageButtonEl.disabled = !imagesEnabled;
         imageInputEl.disabled = !imagesEnabled;
         removeImageButtonEl.disabled = busy || !activeImage;
@@ -585,7 +654,7 @@ HTML = """<!doctype html>
           attachmentNameEl.textContent = activeImage.name;
           attachmentNoteEl.textContent = currentPresetSupportsImages
             ? "This image stays attached for upcoming turns until you clear it or switch presets."
-            : "This image is attached, but the current preset is text-only. Switch to Qwen 3.5 or clear it.";
+            : `This image will use ${visionPresetLabel} because the active model is text-only.`;
         } else {
           attachmentPreviewEl.classList.remove("visible");
           attachmentImageEl.removeAttribute("src");
@@ -593,13 +662,36 @@ HTML = """<!doctype html>
           attachmentNoteEl.textContent = "";
         }
 
-        if (currentPresetSupportsImages) {
+        if (imageChatAvailable) {
           dropzoneCopyEl.textContent = activeImage
             ? "The current conversation image is ready. Drop a new one to replace it."
-            : "Drag and drop one image here, or click to browse.";
+            : `Drag and drop one image here. Text uses the active model; images use ${visionPresetLabel} when needed.`;
         } else {
-          dropzoneCopyEl.textContent = "This preset is text-only. Switch to a Qwen 3.5 preset to use image chat.";
+          dropzoneCopyEl.textContent = "Image chat is unavailable because no vision preset is configured.";
         }
+      }
+
+      function imageUnavailableMessage() {
+        if (busy) {
+          return "Wait for the current local request to finish before attaching an image.";
+        }
+        if (!currentPresetId) {
+          return "Presets are still loading. Try attaching the image again once the app is ready.";
+        }
+        return "Image chat is unavailable because no vision preset is configured.";
+      }
+
+      function showImageUnavailable() {
+        renderMessage("system", imageUnavailableMessage());
+      }
+
+      function eventHasFiles(event) {
+        const types = event.dataTransfer ? event.dataTransfer.types : [];
+        return Array.from(types).includes("Files");
+      }
+
+      function modelCacheDescription() {
+        return modelCacheDir ? `${modelCacheDir}/huggingface/hub` : "the configured model cache";
       }
 
       function setBusy(nextBusy, label = "Ready") {
@@ -648,6 +740,7 @@ HTML = """<!doctype html>
       }
 
       function restoreMessages() {
+        messagesRestored = true;
         messagesEl.innerHTML = "";
         for (const item of chat) {
           renderMessage(item.role, item.content, { imageName: item.image_name || "" });
@@ -655,7 +748,7 @@ HTML = """<!doctype html>
         if (!chat.length) {
           renderMessage(
             "system",
-            "Connected. Pick a preset, send a prompt, and use Qwen 3.5 if you want to drag in an image."
+            "Connected. Text starts on Gemma 4 26B by default. You can also drag in an image; image turns use the configured vision preset when needed."
           );
         }
       }
@@ -694,9 +787,14 @@ HTML = """<!doctype html>
         statusEl.textContent = info.state === "ready" ? "Ready" : info.state;
         currentPresetId = info.current_preset.id;
         currentPresetSupportsImages = Boolean(info.current_preset.supports_images);
+        imageChatAvailable = Boolean(info.image_chat_available);
+        visionPresetLabel = info.vision_preset ? info.vision_preset.label : "the vision preset";
+        modelCacheDir = info.model_cache_dir || "";
         presetSelectEl.value = currentPresetId;
         benchmarkLinkEl.href = info.benchmark_url;
         benchmarkLabelEl.textContent = `Read the ${info.current_preset.family} benchmark post`;
+        cacheNoticeEl.textContent = info.cache_notice || "";
+        cacheNoticeEl.classList.toggle("visible", Boolean(info.cache_notice));
         updateAttachmentUI();
         persistState();
       }
@@ -721,30 +819,54 @@ HTML = """<!doctype html>
         });
       }
 
+      function inferImageMediaType(file) {
+        if (SUPPORTED_IMAGE_TYPES.has(file.type)) {
+          return file.type;
+        }
+        const extension = (file.name || "").split(".").pop().toLowerCase();
+        return IMAGE_TYPE_BY_EXTENSION.get(extension) || "";
+      }
+
+      function normalizeDataUrl(dataUrl, mediaType) {
+        const prefix = `data:${mediaType};base64,`;
+        if (dataUrl.startsWith(prefix)) {
+          return dataUrl;
+        }
+        const separatorIndex = dataUrl.indexOf(",");
+        if (separatorIndex === -1) {
+          throw new Error("Failed to read the selected image as a base64 data URL");
+        }
+        return `${prefix}${dataUrl.slice(separatorIndex + 1)}`;
+      }
+
       async function attachImageFile(file) {
         if (!file) return;
-        if (!file.type || !file.type.startsWith("image/")) {
-          throw new Error("Only image files are supported");
+        const mediaType = inferImageMediaType(file);
+        if (!mediaType) {
+          throw new Error("Only JPEG, PNG, and WebP images are supported");
         }
-        if (!currentPresetSupportsImages) {
-          throw new Error("The current preset is text-only. Switch to a Qwen 3.5 preset to use images.");
+        if (!imageChatAvailable) {
+          throw new Error("Image chat is unavailable because no vision preset is configured.");
         }
         const dataUrl = await fileToDataUrl(file);
         activeImage = {
           name: file.name || "image",
-          media_type: file.type,
-          data_url: dataUrl,
+          media_type: mediaType,
+          data_url: normalizeDataUrl(dataUrl, mediaType),
         };
         updateAttachmentUI();
+        const routeText = currentPresetSupportsImages
+          ? "It will stay available for upcoming turns until you clear it or switch presets."
+          : `Sending it will switch to ${visionPresetLabel}. If that model is not cached yet, it will download into ${modelCacheDescription()}.`;
         renderMessage(
           "system",
-          `Attached image: ${activeImage.name}. It will stay available for upcoming turns until you clear it or switch presets.`
+          `Attached image: ${activeImage.name}. ${routeText}`
         );
       }
 
       async function handleSelectedFiles(files) {
         if (!files || !files.length) return;
-        const firstFile = Array.from(files).find((file) => file.type && file.type.startsWith("image/"));
+        const firstFile = Array.from(files).find((file) => Boolean(inferImageMediaType(file)));
         if (!firstFile) {
           throw new Error("Drop or choose a JPEG, PNG, or WebP image");
         }
@@ -752,10 +874,26 @@ HTML = """<!doctype html>
       }
 
       async function loadInfo() {
-        const response = await fetch("/api/info");
-        const data = await response.json();
-        if (!response.ok) {
-          throw new Error(data.error || "Failed to load app info");
+        if (!messagesRestored) {
+          setBusy(true, "Connecting");
+        }
+        let data = null;
+        let lastError = null;
+        for (let attempt = 1; attempt <= INFO_RETRY_ATTEMPTS; attempt += 1) {
+          try {
+            statusEl.textContent = attempt === 1 ? "Connecting" : `Retrying ${attempt}/${INFO_RETRY_ATTEMPTS}`;
+            data = await fetchJson("/api/info", {}, INFO_TIMEOUT_MS);
+            break;
+          } catch (error) {
+            lastError = error;
+            if (attempt < INFO_RETRY_ATTEMPTS) {
+              await delay(INFO_RETRY_DELAY_MS);
+            }
+          }
+        }
+        if (!data) {
+          setBusy(false);
+          throw lastError || new Error("Failed to load app info");
         }
 
         const storedPreset = sessionStorage.getItem(STORAGE_KEYS.preset);
@@ -768,18 +906,28 @@ HTML = """<!doctype html>
         }
 
         syncInfo(data);
-        restoreMessages();
+        if (!messagesRestored) {
+          restoreMessages();
+        }
+        if (data.state === "loading") {
+          setBusy(true, "Loading model");
+          window.setTimeout(() => {
+            loadInfo().catch((error) => {
+              setBusy(false);
+              renderMessage("system", `Startup error: ${error.message}`);
+              statusEl.textContent = "Error";
+            });
+          }, 1000);
+          return;
+        }
+        setBusy(false);
+        if (data.state === "error") {
+          statusEl.textContent = "Error";
+        }
       }
 
       async function sendPrompt() {
         if (busy) return;
-        if (activeImage && !currentPresetSupportsImages) {
-          renderMessage(
-            "system",
-            "The current preset is text-only. Switch to a Qwen 3.5 preset or remove the attached image."
-          );
-          return;
-        }
 
         const rawText = promptEl.value.trim();
         const text = rawText || (activeImage ? "Describe the attached image briefly." : "");
@@ -795,10 +943,11 @@ HTML = """<!doctype html>
         promptEl.value = "";
 
         const pending = renderMessage("assistant", "Thinking...");
-        setBusy(true, "Generating");
+        const routingToVision = Boolean(activeImage && !currentPresetSupportsImages);
+        setBusy(true, routingToVision ? `Loading ${visionPresetLabel}` : "Generating");
 
         try {
-          const response = await fetch("/api/chat", {
+          const data = await fetchJson("/api/chat", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -808,11 +957,10 @@ HTML = """<!doctype html>
               conversation_image: activeImage,
             }),
           });
-          const data = await response.json();
-          if (!response.ok) {
-            throw new Error(data.error || "Request failed");
-          }
           pending.textContent = data.reply;
+          if (data.current_preset) {
+            syncInfo(data);
+          }
           chat.push({ role: "assistant", content: data.reply });
           persistState();
         } catch (error) {
@@ -833,7 +981,7 @@ HTML = """<!doctype html>
         const previousPresetId = currentPresetId;
         setBusy(true, "Reloading");
         try {
-          const response = await fetch("/api/switch-preset", {
+          const data = await fetchJson("/api/switch-preset", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -843,10 +991,6 @@ HTML = """<!doctype html>
               conversation_image: activeImage,
             }),
           });
-          const data = await response.json();
-          if (!response.ok) {
-            throw new Error(data.error || "Preset switch failed");
-          }
 
           conversationSummary = data.conversation_summary || "";
           const removedImageName = activeImage ? activeImage.name : "";
@@ -878,7 +1022,7 @@ HTML = """<!doctype html>
       sendButton.addEventListener("click", sendPrompt);
       clearButton.addEventListener("click", clearChat);
       browseImageButtonEl.addEventListener("click", () => {
-        if (!busy && currentPresetSupportsImages) {
+        if (!busy && imageChatAvailable) {
           imageInputEl.click();
         }
       });
@@ -898,36 +1042,59 @@ HTML = """<!doctype html>
         if (event.target.closest("button")) {
           return;
         }
-        if (!busy && currentPresetSupportsImages) {
+        if (!busy && imageChatAvailable) {
           imageInputEl.click();
+        } else {
+          showImageUnavailable();
         }
       });
       presetSelectEl.addEventListener("change", (event) => {
         switchPreset(event.target.value);
       });
       imageDropzoneEl.addEventListener("dragenter", (event) => {
-        if (!busy && currentPresetSupportsImages) {
-          event.preventDefault();
+        event.preventDefault();
+        if (!busy && imageChatAvailable) {
           imageDropzoneEl.classList.add("active");
         }
       });
       imageDropzoneEl.addEventListener("dragover", (event) => {
-        if (!busy && currentPresetSupportsImages) {
-          event.preventDefault();
+        event.preventDefault();
+        if (!busy && imageChatAvailable) {
           imageDropzoneEl.classList.add("active");
         }
       });
       imageDropzoneEl.addEventListener("dragleave", (event) => {
-        if (event.target === imageDropzoneEl) {
+        if (!imageDropzoneEl.contains(event.relatedTarget)) {
           imageDropzoneEl.classList.remove("active");
         }
       });
       imageDropzoneEl.addEventListener("drop", async (event) => {
+        event.preventDefault();
         imageDropzoneEl.classList.remove("active");
-        if (busy || !currentPresetSupportsImages) {
+        if (busy || !imageChatAvailable) {
+          showImageUnavailable();
+          return;
+        }
+        try {
+          await handleSelectedFiles(event.dataTransfer.files);
+        } catch (error) {
+          renderMessage("system", `Image attach failed: ${error.message}`);
+        }
+      });
+      window.addEventListener("dragover", (event) => {
+        if (eventHasFiles(event)) {
+          event.preventDefault();
+        }
+      });
+      window.addEventListener("drop", async (event) => {
+        if (!eventHasFiles(event) || imageDropzoneEl.contains(event.target)) {
           return;
         }
         event.preventDefault();
+        if (busy || !imageChatAvailable) {
+          showImageUnavailable();
+          return;
+        }
         try {
           await handleSelectedFiles(event.dataTransfer.files);
         } catch (error) {
@@ -942,6 +1109,7 @@ HTML = """<!doctype html>
       });
 
       loadInfo().catch((error) => {
+        setBusy(false);
         renderMessage("system", `Startup error: ${error.message}`);
         statusEl.textContent = "Error";
       });
@@ -1040,8 +1208,11 @@ class ChatHandler(BaseHTTPRequestHandler):
             raise ValueError("`conversation_image.media_type` must be an image media type")
         if media_type not in {"image/jpeg", "image/png", "image/webp"}:
             raise ValueError("Only JPEG, PNG, and WebP images are supported")
-        if not isinstance(data_url, str) or not data_url.startswith("data:"):
-            raise ValueError("`conversation_image.data_url` must be a base64 data URL")
+        expected_prefix = f"data:{media_type};base64,"
+        if not isinstance(data_url, str) or not data_url.startswith(expected_prefix):
+            raise ValueError(
+                "`conversation_image.data_url` must be a base64 data URL matching the media type"
+            )
         return ConversationImage(name=name.strip() or "image", media_type=media_type, data_url=data_url)
 
     def _info_payload(self) -> dict[str, Any]:
@@ -1087,7 +1258,9 @@ class ChatHandler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 self._send_json({"error": str(exc)}, status=500)
                 return
-            self._send_json({"reply": result.text})
+            snapshot = self._info_payload()
+            snapshot["reply"] = result.text
+            self._send_json(snapshot)
             return
 
         preset_id = payload.get("preset_id")
@@ -1116,6 +1289,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Serve Local Chat with switchable local model presets."
     )
     parser.add_argument("--preset", default=None, help="Initial preset id")
+    parser.add_argument(
+        "--vision-preset",
+        default=DEFAULT_VISION_PRESET_ID,
+        help=(
+            "Preset to use automatically for image turns when the active preset is text-only. "
+            "Use an empty string to disable image routing."
+        ),
+    )
     parser.add_argument(
         "--runtime",
         choices=["mlx", "llama"],
@@ -1154,15 +1335,22 @@ def main() -> int:
             print(f"{preset.id}\t{preset.family}\t{preset.runtime_label}\t{preset.label}")
         return 0
 
-    preset_id = resolve_initial_preset_id(args.preset, args.runtime, args.model)
+    requested_preset = args.preset
+    if not requested_preset and not args.runtime and not args.model:
+        requested_preset = DEFAULT_PRESET_ID
+    preset_id = resolve_initial_preset_id(requested_preset, args.runtime, args.model)
     initial_preset = get_preset(preset_id)
+    vision_preset_id = args.vision_preset.strip() or None
+    if vision_preset_id is not None and not get_preset(vision_preset_id).supports_images:
+        raise ValueError(f"--vision-preset `{vision_preset_id}` must support images")
     model_cache_dir = configure_model_cache(args.model_cache_dir)
     settings = BackendFactorySettings(
         system_prompt=args.system_prompt or "You are a concise, helpful assistant. Answer directly and clearly.",
         ctx_size=args.ctx_size,
         model_cache_dir=str(model_cache_dir),
+        vision_preset_id=vision_preset_id,
     )
-    manager = BackendManager(initial_preset=initial_preset, settings=settings)
+    manager = BackendManager(initial_preset=initial_preset, settings=settings, autoload=False)
     server = AppServer((args.host, args.port), manager, default_max_tokens=args.max_tokens)
     url = f"http://{args.host}:{args.port}"
     print(f"[local-chat] Serving chat app at {url}", flush=True)
@@ -1171,6 +1359,14 @@ def main() -> int:
         flush=True,
     )
     print(f"[local-chat] Model cache: {model_cache_dir}", flush=True)
+    if vision_preset_id:
+        vision_preset = get_preset(vision_preset_id)
+        print(
+            f"[local-chat] Image turns auto-route to: {vision_preset.label} ({vision_preset.runtime_label})",
+            flush=True,
+        )
+    print(f"[local-chat] {manager.snapshot()['cache_notice']}", flush=True)
+    manager.start_loading()
 
     if args.open_browser:
         webbrowser.open(url)

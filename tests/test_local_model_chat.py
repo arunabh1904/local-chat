@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
@@ -107,6 +108,28 @@ class LocalModelChatTests(unittest.TestCase):
         self.assertEqual(manager.snapshot()["current_preset"]["id"], "qwen3-14b-mlx")
         manager.close()
 
+    def test_backend_manager_can_load_in_background_with_cache_notice(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = BackendManager(
+                initial_preset=get_preset("gemma4-e2b-mlx"),
+                settings=BackendFactorySettings(model_cache_dir=temp_dir),
+                backend_factory=fake_backend_factory,
+                autoload=False,
+            )
+            snapshot = manager.snapshot()
+            self.assertEqual(snapshot["state"], "loading")
+            self.assertIn("Downloading Gemma 4 E2B", snapshot["cache_notice"])
+            self.assertIn(str(Path(temp_dir) / "huggingface" / "hub"), snapshot["cache_notice"])
+
+            manager.start_loading()
+            for _ in range(20):
+                if manager.snapshot()["state"] == "ready":
+                    break
+                time.sleep(0.01)
+            self.assertEqual(manager.snapshot()["state"], "ready")
+            self.assertEqual(manager.snapshot()["cache_notice"], "")
+            manager.close()
+
     def test_configure_model_cache_sets_hf_environment(self):
         tracked = [
             "LOCAL_CHAT_MODEL_CACHE_DIR",
@@ -156,6 +179,8 @@ class LocalModelChatTests(unittest.TestCase):
             self.assertEqual(payload["current_preset"]["id"], "gemma4-e2b-mlx")
             self.assertGreater(len(payload["presets"]), 1)
             self.assertIn("model_cache_dir", payload)
+            self.assertTrue(payload["image_chat_available"])
+            self.assertEqual(payload["vision_preset"]["id"], "qwen35-9b-mlx")
             self.assertFalse(payload["current_preset"]["supports_images"])
             self.assertTrue(any(item["supports_images"] for item in payload["presets"]))
 
@@ -180,6 +205,26 @@ class LocalModelChatTests(unittest.TestCase):
                 payload = json.loads(response.read().decode("utf-8"))
             self.assertIn("hello", payload["reply"])
             self.assertIn("tiny.png", payload["reply"])
+            self.assertEqual(payload["current_preset"]["id"], "qwen35-9b-mlx")
+
+            mismatched_image_request = Request(
+                f"{base_url}/api/chat",
+                data=json.dumps(
+                    {
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "conversation_image": {
+                            "name": "tiny.png",
+                            "media_type": "image/png",
+                            "data_url": TEST_IMAGE.replace("data:image/png", "data:image/jpeg"),
+                        },
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with self.assertRaises(HTTPError) as mismatched_image_error:
+                urlopen(mismatched_image_request)
+            self.assertEqual(mismatched_image_error.exception.code, 400)
 
             switch_request = Request(
                 f"{base_url}/api/switch-preset",

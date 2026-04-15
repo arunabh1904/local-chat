@@ -18,7 +18,7 @@ from typing import Any, Callable
 import requests
 from requests.adapters import HTTPAdapter
 
-from .presets import Preset, SYSTEM_PROMPT, get_preset
+from .presets import DEFAULT_VISION_PRESET_ID, Preset, SYSTEM_PROMPT, get_preset
 
 
 REQUEST_TIMEOUT = 60 * 60
@@ -43,6 +43,7 @@ class BackendFactorySettings:
     ctx_size: int = 16384
     llama_port: int = LLAMA_INTERNAL_PORT
     model_cache_dir: str | None = None
+    vision_preset_id: str | None = DEFAULT_VISION_PRESET_ID
 
 
 @dataclass(frozen=True)
@@ -664,6 +665,7 @@ class BackendManager:
         initial_preset: Preset,
         settings: BackendFactorySettings,
         backend_factory: Callable[[Preset, BackendFactorySettings], Backend] = create_backend,
+        autoload: bool = True,
     ):
         self.settings = settings
         self.backend_factory = backend_factory
@@ -672,23 +674,114 @@ class BackendManager:
         self.error: str | None = None
         self.current_preset = initial_preset
         self.backend: Backend | None = None
-        self._load_locked(initial_preset)
+        self.cache_notice = ""
+        self.loader_thread: threading.Thread | None = None
+        if autoload:
+            self._load_locked(initial_preset)
+        else:
+            self._begin_load_locked(initial_preset)
 
-    def _load_locked(self, preset: Preset) -> None:
+    def _hub_cache_dir(self) -> Path | None:
+        if not self.settings.model_cache_dir:
+            return None
+        return Path(self.settings.model_cache_dir) / "huggingface" / "hub"
+
+    def _repo_cache_dir(self, preset: Preset) -> Path | None:
+        hub_cache_dir = self._hub_cache_dir()
+        if hub_cache_dir is None:
+            return None
+        return hub_cache_dir / f"models--{preset.hf_repo.replace('/', '--')}"
+
+    def _has_repo_cache(self, preset: Preset) -> bool:
+        repo_cache_dir = self._repo_cache_dir(preset)
+        return bool(repo_cache_dir and repo_cache_dir.exists() and any(repo_cache_dir.iterdir()))
+
+    def _cache_notice_for_preset(self, preset: Preset) -> str:
+        hub_cache_dir = self._hub_cache_dir()
+        if hub_cache_dir is None:
+            return f"Loading {preset.label}. Model artifacts will use the configured Hugging Face cache."
+        if self._has_repo_cache(preset):
+            return f"Loading {preset.label} from local cache at {hub_cache_dir}."
+        return (
+            f"Downloading {preset.label} from Hugging Face into {hub_cache_dir}, "
+            "then loading it. The first run can take a while."
+        )
+
+    def _begin_load_locked(self, preset: Preset) -> None:
         self.state = "loading"
         self.error = None
         self.current_preset = preset
-        self.backend = self.backend_factory(preset, self.settings)
+        self.backend = None
+        self.cache_notice = self._cache_notice_for_preset(preset)
+
+    def _finish_load_locked(self, preset: Preset, backend: Backend) -> None:
+        self.current_preset = preset
+        self.backend = backend
         self.state = "ready"
+        self.error = None
+        self.cache_notice = ""
+
+    def _fail_load_locked(self, preset: Preset, exc: Exception) -> None:
+        self.current_preset = preset
+        self.backend = None
+        self.state = "error"
+        self.error = str(exc)
+        self.cache_notice = f"Failed to load {preset.label}: {exc}"
+
+    def _load_locked(self, preset: Preset) -> None:
+        self._begin_load_locked(preset)
+        try:
+            backend = self.backend_factory(preset, self.settings)
+        except Exception as exc:
+            self._fail_load_locked(preset, exc)
+            raise
+        self._finish_load_locked(preset, backend)
+
+    def _load_in_background(self, preset: Preset) -> None:
+        try:
+            backend = self.backend_factory(preset, self.settings)
+        except Exception as exc:  # noqa: BLE001
+            with self.lock:
+                self._fail_load_locked(preset, exc)
+            return
+
+        with self.lock:
+            if self.current_preset.id != preset.id or self.state != "loading":
+                backend.close()
+                return
+            self._finish_load_locked(preset, backend)
+
+    def start_loading(self) -> None:
+        with self.lock:
+            if self.backend is not None:
+                return
+            if self.loader_thread is not None and self.loader_thread.is_alive():
+                return
+            preset = self.current_preset
+            self._begin_load_locked(preset)
+            self.loader_thread = threading.Thread(
+                target=self._load_in_background,
+                args=(preset,),
+                daemon=True,
+            )
+            self.loader_thread.start()
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
+            vision_preset = (
+                get_preset(self.settings.vision_preset_id)
+                if self.settings.vision_preset_id
+                else None
+            )
             return {
                 "state": self.state,
                 "error": self.error,
                 "current_preset": self.current_preset.to_public_dict(),
                 "benchmark_url": self.current_preset.benchmark_url,
                 "model_cache_dir": self.settings.model_cache_dir,
+                "cache_notice": self.cache_notice,
+                "image_chat_available": bool(vision_preset),
+                "vision_preset": vision_preset.to_public_dict() if vision_preset else None,
             }
 
     def _require_backend(self) -> Backend:
@@ -704,6 +797,25 @@ class BackendManager:
         conversation_image: ConversationImage | None = None,
     ) -> CompletionResult:
         with self.lock:
+            if conversation_image is not None and not self.current_preset.supports_images:
+                if not self.settings.vision_preset_id:
+                    raise RuntimeError(
+                        f"{self.current_preset.label} is text-only and no vision preset is configured."
+                    )
+                vision_preset = get_preset(self.settings.vision_preset_id)
+                if not vision_preset.supports_images:
+                    raise RuntimeError(
+                        f"Configured vision preset `{vision_preset.id}` does not support images."
+                    )
+                if self.backend is not None:
+                    self.backend.close()
+                    self.backend = None
+                    gc.collect()
+                log(
+                    f"Image attached while {self.current_preset.label} is active; "
+                    f"switching to vision preset {vision_preset.label}"
+                )
+                self._load_locked(vision_preset)
             backend = self._require_backend()
             full_messages = build_chat_messages(
                 self.settings.system_prompt,
@@ -745,24 +857,30 @@ class BackendManager:
             if target_preset.id == self.current_preset.id:
                 return conversation_summary.strip()
 
+            summary_image = conversation_image if self.current_preset.supports_images else None
             if messages or conversation_summary.strip():
                 summary_result = backend.generate(
                     build_summary_messages(
                         conversation_summary,
                         messages,
-                        conversation_image,
+                        summary_image,
                     ),
                     max_tokens=SUMMARY_MAX_TOKENS,
-                    conversation_image=conversation_image,
+                    conversation_image=summary_image,
+                )
+                carried_summary = summary_result.text.strip()
+            elif summary_image is not None:
+                summary_result = backend.generate(
+                    build_summary_messages("", [], summary_image),
+                    max_tokens=SUMMARY_MAX_TOKENS,
+                    conversation_image=summary_image,
                 )
                 carried_summary = summary_result.text.strip()
             elif conversation_image is not None:
-                summary_result = backend.generate(
-                    build_summary_messages("", [], conversation_image),
-                    max_tokens=SUMMARY_MAX_TOKENS,
-                    conversation_image=conversation_image,
+                carried_summary = (
+                    f"The user attached image `{conversation_image.name}`, but it was cleared "
+                    "while switching away from a text-only preset before the model analyzed it."
                 )
-                carried_summary = summary_result.text.strip()
             else:
                 carried_summary = ""
 
