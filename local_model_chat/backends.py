@@ -291,6 +291,20 @@ class Backend:
     ) -> CompletionResult:
         raise NotImplementedError
 
+    def generate_stream(
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int,
+        on_text: Callable[[str], None],
+        conversation_image: ConversationImage | None = None,
+    ) -> CompletionResult:
+        """Stream when supported, with a safe whole-response fallback."""
+
+        result = self.generate(messages, max_tokens, conversation_image)
+        if result.text:
+            on_text(result.text)
+        return result
+
     def close(self) -> None:
         return
 
@@ -321,6 +335,20 @@ class MLXLMBackend(Backend):
         max_tokens: int,
         conversation_image: ConversationImage | None = None,
     ) -> CompletionResult:
+        return self.generate_stream(
+            messages,
+            max_tokens,
+            lambda _text: None,
+            conversation_image,
+        )
+
+    def generate_stream(
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int,
+        on_text: Callable[[str], None],
+        conversation_image: ConversationImage | None = None,
+    ) -> CompletionResult:
         if conversation_image is not None:
             raise RuntimeError(
                 f"{self.display_model} is text-only. Switch to a Qwen 3.5 preset to use image chat."
@@ -347,6 +375,7 @@ class MLXLMBackend(Backend):
                     if first_token_at is None:
                         first_token_at = time.perf_counter()
                     pieces.append(chunk.text)
+                    on_text(chunk.text)
         finished = time.perf_counter()
         text = "".join(pieces).strip()
         generation_tokens = getattr(last_chunk, "generation_tokens", None)
@@ -398,6 +427,20 @@ class MLXVLMBackend(Backend):
         max_tokens: int,
         conversation_image: ConversationImage | None = None,
     ) -> CompletionResult:
+        return self.generate_stream(
+            messages,
+            max_tokens,
+            lambda _text: None,
+            conversation_image,
+        )
+
+    def generate_stream(
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int,
+        on_text: Callable[[str], None],
+        conversation_image: ConversationImage | None = None,
+    ) -> CompletionResult:
         rendered_prompt = _render_prompt(
             self.processor,
             messages,
@@ -424,6 +467,7 @@ class MLXVLMBackend(Backend):
                         if first_token_at is None:
                             first_token_at = time.perf_counter()
                         pieces.append(chunk.text)
+                        on_text(chunk.text)
         finished = time.perf_counter()
         text = "".join(pieces).strip()
         generation_tokens = getattr(last_chunk, "generation_tokens", None)
@@ -459,6 +503,7 @@ class LlamaCppBackend(Backend):
         )
         self.session = make_session()
         self.proc: subprocess.Popen[Any] | None = None
+        self.log_file: Any | None = None
 
         if settings.auto_start_llama:
             try:
@@ -470,24 +515,69 @@ class LlamaCppBackend(Backend):
 
             if not preset.hf_file:
                 raise RuntimeError(f"Preset `{preset.id}` does not define a GGUF file")
-            log(f"Downloading GGUF for {preset.label} from {preset.hf_repo}")
-            model_path = hf_hub_download(repo_id=preset.hf_repo, filename=preset.hf_file)
+
+            def resolve_artifact(filename: str) -> str:
+                # Reuse explicitly downloaded artifacts under the app cache root
+                # before asking Hugging Face for another multi-gigabyte copy.
+                if settings.model_cache_dir and preset.cache_subdir:
+                    local_path = (
+                        Path(settings.model_cache_dir)
+                        / preset.cache_subdir
+                        / filename
+                    )
+                    if local_path.is_file():
+                        return str(local_path)
+                return hf_hub_download(repo_id=preset.hf_repo, filename=filename)
+
+            log(f"Resolving GGUF artifacts for {preset.label} from {preset.hf_repo}")
+            model_path = resolve_artifact(preset.hf_file)
+            mmproj_path = (
+                resolve_artifact(preset.mmproj_file) if preset.mmproj_file else None
+            )
+            draft_path = (
+                resolve_artifact(preset.draft_file) if preset.draft_file else None
+            )
             log_path = Path("/private/tmp") / f"local-model-chat-{preset.id}.log"
-            log_file = log_path.open("w")
+            self.log_file = log_path.open("w")
             command = [
                 "llama-server",
                 "--model",
                 model_path,
-                "--no-mmproj",
                 "--host",
                 LLAMA_INTERNAL_HOST,
                 "--port",
                 str(settings.llama_port),
                 "--ctx-size",
                 str(settings.ctx_size),
+                "--parallel",
+                "1",
+                "--gpu-layers",
+                "all",
                 "--flash-attn",
                 "on",
+                "--jinja",
             ]
+            if mmproj_path:
+                command.extend(["--mmproj", mmproj_path])
+                if preset.image_max_tokens is not None:
+                    command.extend(["--image-max-tokens", str(preset.image_max_tokens)])
+            else:
+                command.append("--no-mmproj")
+            if draft_path:
+                command.extend(
+                    [
+                        "--model-draft",
+                        draft_path,
+                        "--gpu-layers-draft",
+                        "all",
+                    ]
+                )
+                if preset.speculative_type:
+                    command.extend(["--spec-type", preset.speculative_type])
+            if preset.reasoning_budget is not None:
+                command.extend(["--reasoning-budget", str(preset.reasoning_budget)])
+                if preset.reasoning_budget == 0:
+                    command.extend(["--reasoning", "off"])
             if preset.chat_template_kwargs:
                 command.extend(
                     [
@@ -498,13 +588,16 @@ class LlamaCppBackend(Backend):
             log(f"Starting llama-server on {self.llama_url}")
             self.proc = subprocess.Popen(
                 command,
-                stdout=log_file,
+                stdout=self.log_file,
                 stderr=subprocess.STDOUT,
             )
             try:
                 wait_for_http(f"{self.llama_url}/health")
             except Exception:
                 cleanup_process(self.proc)
+                if self.log_file is not None:
+                    self.log_file.close()
+                    self.log_file = None
                 raise
         else:
             log(f"Using existing llama.cpp server at {self.llama_url}")
@@ -569,27 +662,60 @@ class LlamaCppBackend(Backend):
         max_tokens: int,
         conversation_image: ConversationImage | None = None,
     ) -> CompletionResult:
-        if conversation_image is not None:
-            raise RuntimeError(
-                f"{self.display_model} is text-only. Switch to a Qwen 3.5 preset to use image chat."
-            )
-        text, usage, total_time = self._nonstream_request(messages, max_tokens)
-        generation_tokens = usage.get("completion_tokens")
-        metrics = CompletionMetrics(
-            generation_tokens=generation_tokens,
-            prompt_tokens=usage.get("prompt_tokens"),
-            average_tokens_per_s=(
-                generation_tokens / max(total_time, 1e-9)
-                if generation_tokens is not None
-                else None
-            ),
+        return self.generate_stream(
+            messages,
+            max_tokens,
+            lambda _text: None,
+            conversation_image,
         )
-        return CompletionResult(text=text, metrics=metrics)
+
+    def generate_stream(
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int,
+        on_text: Callable[[str], None],
+        conversation_image: ConversationImage | None = None,
+    ) -> CompletionResult:
+        if conversation_image is not None:
+            if not self.preset.supports_images:
+                raise RuntimeError(
+                    f"{self.display_model} is text-only. Switch to a vision preset to use image chat."
+                )
+            messages = self._messages_with_image_url(messages, conversation_image)
+        return self._stream_request(messages, max_tokens, on_text)
+
+    @staticmethod
+    def _messages_with_image_url(
+        messages: list[dict[str, Any]],
+        conversation_image: ConversationImage,
+    ) -> list[dict[str, Any]]:
+        """Translate the app's generic image marker to OpenAI image_url input."""
+
+        rendered = json.loads(json.dumps(messages))
+        for message in reversed(rendered):
+            if message.get("role") != "user" or not isinstance(message.get("content"), list):
+                continue
+            for index, item in enumerate(message["content"]):
+                if isinstance(item, dict) and item.get("type") == "image":
+                    message["content"][index] = {
+                        "type": "image_url",
+                        "image_url": {"url": conversation_image.data_url},
+                    }
+                    return rendered
+        raise RuntimeError("Image input did not contain a user image marker")
 
     def benchmark(
         self,
         messages: list[dict[str, Any]],
         max_tokens: int,
+    ) -> CompletionResult:
+        return self._stream_request(messages, max_tokens, lambda _text: None)
+
+    def _stream_request(
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int,
+        on_text: Callable[[str], None],
     ) -> CompletionResult:
         pieces: list[str] = []
         usage: dict[str, Any] | None = None
@@ -602,12 +728,16 @@ class LlamaCppBackend(Backend):
             stream=True,
         ) as response:
             response.raise_for_status()
-            for raw_line in response.iter_lines(decode_unicode=True):
+            # Split SSE on the wire newline before UTF-8 decoding. Decoding as
+            # Latin-1 first can turn an emoji byte (for example 0x85) into a
+            # Unicode line separator and corrupt an otherwise valid JSON event.
+            for raw_line in response.iter_lines(decode_unicode=False, delimiter=b"\n"):
                 if not raw_line:
                     continue
-                if not raw_line.startswith("data: "):
+                line = raw_line.decode("utf-8").rstrip("\r")
+                if not line.startswith("data: "):
                     continue
-                payload = raw_line.removeprefix("data: ").strip()
+                payload = line.removeprefix("data: ").strip()
                 if payload == "[DONE]":
                     break
                 event = json.loads(payload)
@@ -622,6 +752,7 @@ class LlamaCppBackend(Backend):
                     if first_token_at is None:
                         first_token_at = time.perf_counter()
                     pieces.append(text)
+                    on_text(text)
         finished = time.perf_counter()
         text = "".join(pieces).strip()
         if usage is None:
@@ -647,6 +778,9 @@ class LlamaCppBackend(Backend):
 
     def close(self) -> None:
         cleanup_process(self.proc)
+        if self.log_file is not None:
+            self.log_file.close()
+            self.log_file = None
 
 
 def create_backend(preset: Preset, settings: BackendFactorySettings) -> Backend:
@@ -693,6 +827,17 @@ class BackendManager:
         return hub_cache_dir / f"models--{preset.hf_repo.replace('/', '--')}"
 
     def _has_repo_cache(self, preset: Preset) -> bool:
+        if self.settings.model_cache_dir and preset.hf_file and preset.cache_subdir:
+            artifact_dir = (
+                Path(self.settings.model_cache_dir)
+                / preset.cache_subdir
+            )
+            required_files = [preset.hf_file, preset.mmproj_file, preset.draft_file]
+            if all(
+                filename is None or (artifact_dir / filename).is_file()
+                for filename in required_files
+            ):
+                return True
         repo_cache_dir = self._repo_cache_dir(preset)
         return bool(repo_cache_dir and repo_cache_dir.exists() and any(repo_cache_dir.iterdir()))
 
@@ -701,7 +846,7 @@ class BackendManager:
         if hub_cache_dir is None:
             return f"Loading {preset.label}. Model artifacts will use the configured Hugging Face cache."
         if self._has_repo_cache(preset):
-            return f"Loading {preset.label} from local cache at {hub_cache_dir}."
+            return f"Loading {preset.label} from the local model cache at {self.settings.model_cache_dir}."
         return (
             f"Downloading {preset.label} from Hugging Face into {hub_cache_dir}, "
             "then loading it. The first run can take a while."
@@ -826,6 +971,44 @@ class BackendManager:
             return backend.generate(
                 full_messages,
                 max_tokens=max_tokens,
+                conversation_image=conversation_image,
+            )
+
+    def stream_chat(
+        self,
+        messages: list[dict[str, str]],
+        conversation_summary: str,
+        max_tokens: int,
+        on_text: Callable[[str], None],
+        conversation_image: ConversationImage | None = None,
+    ) -> CompletionResult:
+        with self.lock:
+            if conversation_image is not None and not self.current_preset.supports_images:
+                if not self.settings.vision_preset_id:
+                    raise RuntimeError(
+                        f"{self.current_preset.label} is text-only and no vision preset is configured."
+                    )
+                vision_preset = get_preset(self.settings.vision_preset_id)
+                if self.backend is not None:
+                    self.backend.close()
+                    self.backend = None
+                    gc.collect()
+                log(
+                    f"Image attached while {self.current_preset.label} is active; "
+                    f"switching to vision preset {vision_preset.label}"
+                )
+                self._load_locked(vision_preset)
+            backend = self._require_backend()
+            full_messages = build_chat_messages(
+                self.settings.system_prompt,
+                conversation_summary,
+                messages,
+                conversation_image,
+            )
+            return backend.generate_stream(
+                full_messages,
+                max_tokens=max_tokens,
+                on_text=on_text,
                 conversation_image=conversation_image,
             )
 

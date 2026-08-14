@@ -8,15 +8,18 @@ The GitHub repo is now `local-chat`, and the app itself is branded as `Local Cha
 
 It currently supports:
 
+- `Muse Glimmer 30B` on `llama.cpp` with its official vision projector and DFlash drafter
 - `Gemma 4` on `MLX`
 - `Qwen 3.5` on `MLX` with image chat support
 - `Qwen 3` on `MLX`
 
-The UI stays intentionally small. Chat history lives in the browser session, and switching presets clears the visible transcript while carrying a short summary forward into the next model. Qwen 3.5 presets also let you drag and drop one image into the active conversation.
+The UI uses a compact ChatGPT-style shell with a model dropdown, explicit loading states, image attachment, and live performance metrics. Replies are not capped to an arbitrary UI token limit: generation ends when the model emits its stop token or exhausts the available context. Chat history lives in the browser session, and switching presets clears the visible transcript while carrying a short summary forward into the next model.
+
+Replies stream token-by-token through a chunked NDJSON endpoint. The interface reports time to first token and average generation throughput after each response. Glimmer caps dynamic-resolution images at 1,024 visual tokens to reduce vision TTFT without losing the text and graph details in the reference UI benchmark.
 
 Model artifacts are cached on disk under `~/.cache` by default, so preset switches reuse the shared Hugging Face downloads you already have instead of fetching them again. The reload still has to happen in memory because only one large local model stays active at a time.
 
-`./run.sh` starts the same app every time: Qwen 3.5 35B A3B is the default model for both text and images. It is the largest cached MLX Qwen vision preset used by this repo, and it fits on the target Apple Silicon machine. On a fresh machine, the browser shows a prominent red banner while the active model is downloading into the cache.
+`./run.sh` starts the same app every time: Muse Glimmer 30B is the default for both text and images. Its `llama.cpp` process uses full Metal offload, flash attention, one inference slot, the official vision projector, and the official DFlash speculative drafter. On a fresh machine, the browser shows a prominent red banner while the artifacts download into the cache.
 
 ## Quick Start
 
@@ -31,7 +34,7 @@ Then open [http://127.0.0.1:8099](http://127.0.0.1:8099).
 If you want the direct entrypoint instead of `run.sh`, use:
 
 ```bash
-./.venv/bin/python local_chat.py --preset qwen35-35b-a3b-mlx --vision-preset qwen35-35b-a3b-mlx
+./.venv/bin/python local_chat.py --preset muse-glimmer-30b-llama --vision-preset muse-glimmer-30b-llama
 ```
 
 Override the cache location if you want:
@@ -70,6 +73,7 @@ python gemma_local_chat.py --runtime mlx --model 26b --open-browser
 
 Useful starting points:
 
+- `muse-glimmer-30b-llama`
 - `gemma4-26b-a4b-mlx`
 - `gemma4-31b-mlx`
 - `qwen35-9b-mlx`
@@ -112,6 +116,7 @@ The April 15 benchmark includes the default Qwen 3.5 35B A3B route:
 
 - `setup.sh` installs `mlx-lm`, `mlx-vlm`, plus `torch` and `torchvision`, because Qwen 3.5 MLX presets use the upstream Qwen3-VL processor stack for image chat.
 - Qwen 3.5 presets support one active dragged or selected image at a time. The attachment is cleared when you clear the chat or switch presets.
+- Muse Glimmer uses the same one-image UI with its native `mmproj` vision path; image turns do not reroute to Qwen when Glimmer is active.
 - The first load for any preset can take a while because weights download on demand.
 - By default, downloads now reuse the shared cache under `~/.cache/huggingface`.
 - After the first download, preset switches reuse the on-disk cache and only pay the weight unload/reload cost in memory.
@@ -130,7 +135,7 @@ Useful flags:
 - `--preset <preset-id>`
 - `--vision-preset <preset-id>`
 - `--port 8099`
-- `--max-tokens 512`
+- `--max-tokens -1` (default: run until the model stops; use a positive value only when you want an explicit cap)
 - `--open-browser`
 - `--system-prompt "You are a concise assistant."`
 - `--model-cache-dir /Users/arunabhmishra/.cache`
