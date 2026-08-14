@@ -16,10 +16,12 @@ from local_model_chat.backends import (
     BackendManager,
     CompletionMetrics,
     CompletionResult,
+    ConversationImage,
+    LlamaCppBackend,
 )
 from local_model_chat.model_cache import configure_model_cache, default_model_cache_dir
 from local_model_chat.presets import get_preset, resolve_initial_preset_id
-from local_model_chat.server import AppServer
+from local_model_chat.server import AppServer, DEFAULT_MAX_TOKENS, HTML
 
 
 TEST_IMAGE = (
@@ -50,8 +52,10 @@ class FakeBackend(Backend):
     def __init__(self, preset_id: str):
         self.display_model = preset_id
         self.closed = False
+        self.max_tokens_calls = []
 
     def generate(self, messages, max_tokens, conversation_image=None):
+        self.max_tokens_calls.append(max_tokens)
         if (
             messages
             and messages[0]["role"] == "system"
@@ -91,6 +95,48 @@ class LocalModelChatTests(unittest.TestCase):
         self.assertEqual(
             resolve_initial_preset_id(None, "llama", "31b"),
             "gemma4-31b-mlx",
+        )
+
+    def test_glimmer_is_native_default_with_vision_and_dflash(self):
+        preset = get_preset("muse-glimmer-30b-llama")
+        self.assertTrue(preset.supports_images)
+        self.assertEqual(preset.mmproj_file, "mmproj-Muse-Glimmer-30B-Q4_K_M.gguf")
+        self.assertEqual(preset.draft_file, "dflash-Muse-Glimmer-30B-Q4_K_M.gguf")
+        self.assertEqual(preset.speculative_type, "draft-dflash")
+        self.assertEqual(preset.reasoning_budget, 0)
+        self.assertEqual(preset.image_max_tokens, 1024)
+        self.assertEqual(preset.cache_subdir, "codex-models/muse-glimmer-30b")
+        self.assertEqual(resolve_initial_preset_id(None, None, None), preset.id)
+
+    def test_chat_defaults_to_model_stopping_without_a_ui_token_cap(self):
+        self.assertEqual(DEFAULT_MAX_TOKENS, -1)
+        self.assertNotIn('id="maxTokens"', HTML)
+
+    def test_llama_cpp_translates_image_marker_without_mutating_messages(self):
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "Describe this image."},
+                ],
+            }
+        ]
+        image = ConversationImage(
+            name="tiny.png",
+            media_type="image/png",
+            data_url="data:image/png;base64,AAAA",
+        )
+
+        rendered = LlamaCppBackend._messages_with_image_url(messages, image)
+
+        self.assertEqual(messages[0]["content"][0], {"type": "image"})
+        self.assertEqual(
+            rendered[0]["content"][0],
+            {
+                "type": "image_url",
+                "image_url": {"url": image.data_url},
+            },
         )
 
     def test_backend_manager_switches_and_summarizes(self):
@@ -168,7 +214,9 @@ class LocalModelChatTests(unittest.TestCase):
             settings=BackendFactorySettings(),
             backend_factory=fake_backend_factory,
         )
-        server = AppServer(("127.0.0.1", 0), manager, default_max_tokens=512)
+        server = AppServer(
+            ("127.0.0.1", 0), manager, default_max_tokens=DEFAULT_MAX_TOKENS
+        )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -180,7 +228,7 @@ class LocalModelChatTests(unittest.TestCase):
             self.assertGreater(len(payload["presets"]), 1)
             self.assertIn("model_cache_dir", payload)
             self.assertTrue(payload["image_chat_available"])
-            self.assertEqual(payload["vision_preset"]["id"], "qwen35-35b-a3b-mlx")
+            self.assertEqual(payload["vision_preset"]["id"], "muse-glimmer-30b-llama")
             self.assertFalse(payload["current_preset"]["supports_images"])
             self.assertTrue(any(item["supports_images"] for item in payload["presets"]))
 
@@ -205,7 +253,30 @@ class LocalModelChatTests(unittest.TestCase):
                 payload = json.loads(response.read().decode("utf-8"))
             self.assertIn("hello", payload["reply"])
             self.assertIn("tiny.png", payload["reply"])
-            self.assertEqual(payload["current_preset"]["id"], "qwen35-35b-a3b-mlx")
+            self.assertEqual(payload["current_preset"]["id"], "muse-glimmer-30b-llama")
+
+            stream_request = Request(
+                f"{base_url}/api/chat/stream",
+                data=json.dumps(
+                    {
+                        "messages": [{"role": "user", "content": "stream this ★"}],
+                    }
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urlopen(stream_request) as response:
+                events = [
+                    json.loads(line)
+                    for line in response.read().decode("utf-8").splitlines()
+                    if line.strip()
+                ]
+            self.assertEqual(events[0]["type"], "delta")
+            self.assertIn("stream this ★", events[0]["text"])
+            self.assertEqual(events[-1]["type"], "done")
+            self.assertIn("metrics", events[-1])
+            self.assertIn("info", events[-1])
+            self.assertEqual(manager.backend.max_tokens_calls[-1], -1)
 
             mismatched_image_request = Request(
                 f"{base_url}/api/chat",

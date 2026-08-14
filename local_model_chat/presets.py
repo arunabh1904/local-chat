@@ -5,8 +5,8 @@ from typing import Any
 
 
 SYSTEM_PROMPT = "You are a concise, helpful assistant. Answer directly and clearly."
-DEFAULT_PRESET_ID = "qwen35-35b-a3b-mlx"
-DEFAULT_VISION_PRESET_ID = "qwen35-35b-a3b-mlx"
+DEFAULT_PRESET_ID = "muse-glimmer-30b-llama"
+DEFAULT_VISION_PRESET_ID = "muse-glimmer-30b-llama"
 GEMMA_BENCHMARK_URL = (
     "https://arunabh1904.github.io/blog/2026/04/04/"
     "running-gemma-4-locally-on-a-64-gb-macbook-pro.html"
@@ -14,6 +14,10 @@ GEMMA_BENCHMARK_URL = (
 QWEN_BENCHMARK_URL = (
     "https://arunabh1904.github.io/blog/2026/04/04/"
     "running-qwen-3-5-and-qwen-3-locally-on-a-64-gb-macbook-pro.html"
+)
+GLIMMER_BENCHMARK_URL = (
+    "https://arunabh1904.github.io/blog/2026/08/13/"
+    "running-muse-glimmer-30b-locally-on-a-64-gb-macbook-pro.html"
 )
 
 
@@ -27,6 +31,12 @@ class Preset:
     hf_repo: str
     benchmark_url: str
     hf_file: str | None = None
+    mmproj_file: str | None = None
+    draft_file: str | None = None
+    speculative_type: str | None = None
+    reasoning_budget: int | None = None
+    image_max_tokens: int | None = None
+    cache_subdir: str | None = None
     chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -35,7 +45,7 @@ class Preset:
 
     @property
     def supports_images(self) -> bool:
-        return self.loader_kind == "mlx_vlm"
+        return self.loader_kind == "mlx_vlm" or self.mmproj_file is not None
 
     def to_public_dict(self) -> dict[str, Any]:
         return {
@@ -59,9 +69,18 @@ def _preset(
     hf_repo: str,
     benchmark_url: str,
     hf_file: str | None = None,
+    mmproj_file: str | None = None,
+    draft_file: str | None = None,
+    speculative_type: str | None = None,
+    reasoning_budget: int | None = None,
+    image_max_tokens: int | None = None,
+    reasoning_strength: str | None = None,
+    cache_subdir: str | None = None,
     disable_thinking: bool = True,
 ) -> Preset:
     kwargs = {"enable_thinking": False} if disable_thinking else {}
+    if reasoning_strength is not None:
+        kwargs["reasoning_strength"] = reasoning_strength
     return Preset(
         id=preset_id,
         family=family,
@@ -70,12 +89,36 @@ def _preset(
         loader_kind=loader_kind,
         hf_repo=hf_repo,
         hf_file=hf_file,
+        mmproj_file=mmproj_file,
+        draft_file=draft_file,
+        speculative_type=speculative_type,
+        reasoning_budget=reasoning_budget,
+        image_max_tokens=image_max_tokens,
+        cache_subdir=cache_subdir,
         benchmark_url=benchmark_url,
         chat_template_kwargs=kwargs,
     )
 
 
 PRESETS: tuple[Preset, ...] = (
+    _preset(
+        preset_id="muse-glimmer-30b-llama",
+        family="Muse Glimmer",
+        label="Muse Glimmer 30B + DFlash",
+        runtime="llama",
+        loader_kind="llama_cpp",
+        hf_repo="meta-models/Muse-Glimmer-30B-GGUF",
+        hf_file="Muse-Glimmer-30B-KQuant-17GB-Q4_K_M.gguf",
+        mmproj_file="mmproj-Muse-Glimmer-30B-Q4_K_M.gguf",
+        draft_file="dflash-Muse-Glimmer-30B-Q4_K_M.gguf",
+        speculative_type="draft-dflash",
+        reasoning_budget=0,
+        image_max_tokens=1024,
+        reasoning_strength="low",
+        cache_subdir="codex-models/muse-glimmer-30b",
+        benchmark_url=GLIMMER_BENCHMARK_URL,
+        disable_thinking=False,
+    ),
     _preset(
         preset_id="gemma4-e2b-mlx",
         family="Gemma 4",

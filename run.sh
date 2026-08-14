@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV_DIR="${ROOT_DIR}/.venv"
 PYTHON_BIN="${VENV_DIR}/bin/python"
 DEFAULT_MODEL_CACHE_DIR="${HOME}/.cache"
-DEFAULT_PRESET="${LOCAL_CHAT_DEFAULT_PRESET:-qwen35-35b-a3b-mlx}"
-DEFAULT_VISION_PRESET="${LOCAL_CHAT_DEFAULT_VISION_PRESET:-qwen35-35b-a3b-mlx}"
+DEFAULT_PRESET="${LOCAL_CHAT_DEFAULT_PRESET:-muse-glimmer-30b-llama}"
+DEFAULT_VISION_PRESET="${LOCAL_CHAT_DEFAULT_VISION_PRESET:-muse-glimmer-30b-llama}"
 
 if [[ ! -d "${VENV_DIR}" ]]; then
   echo "Missing ${VENV_DIR}. Run ./setup.sh first." >&2

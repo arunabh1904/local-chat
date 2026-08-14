@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import webbrowser
+from dataclasses import asdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -18,7 +19,10 @@ from .presets import (
 )
 
 
-DEFAULT_MAX_TOKENS = 512
+# ``-1`` is the native "generate until EOS" value for both llama.cpp and the
+# MLX generation path.  Keep the control available to API/CLI callers, but do
+# not impose an arbitrary reply-length ceiling in the chat UI.
+DEFAULT_MAX_TOKENS = -1
 
 
 HTML = """<!doctype html>
@@ -476,16 +480,22 @@ HTML = """<!doctype html>
           <div>
             <h1>Local Chat</h1>
             <p>
-              A tiny browser chat app for local Apple Silicon inference. It starts on the
-              largest cached Qwen vision preset by default, handles text and image turns
-              in one model, and keeps continuity through a short carry-forward summary
-              when you switch presets.
+              A tiny browser chat app for local Apple Silicon inference. It starts on
+              Muse Glimmer with full Metal offload, native vision, and DFlash speculative
+              decoding, then keeps continuity through a short carry-forward summary when
+              you switch presets.
             </p>
           </div>
           <a id="benchmarkLink" class="hero-link" href="#" target="_blank" rel="noreferrer">
             <strong>Benchmark Note</strong>
             <span id="benchmarkLabel">Read the local model benchmark post</span>
           </a>
+        </div>
+        <div class="controls top-controls">
+          <label>
+            <span class="control-label">Switch model</span>
+            <select id="presetSelect" aria-label="Switch active model" title="Switch active model"></select>
+          </label>
         </div>
         <div class="meta">
           <div class="pill"><strong>Runtime</strong> <span id="runtime">Loading...</span></div>
@@ -499,17 +509,6 @@ HTML = """<!doctype html>
         <div id="messages" class="messages"></div>
 
         <div class="composer">
-          <div class="controls">
-            <label>
-              Active Preset
-              <select id="presetSelect"></select>
-            </label>
-            <label>
-              Max Tokens
-              <input id="maxTokens" type="number" min="32" max="4096" step="32" value="__DEFAULT_MAX_TOKENS__" />
-            </label>
-          </div>
-
           <textarea
             id="prompt"
             placeholder="Ask your local model something. Shift+Enter adds a newline."
@@ -544,10 +543,12 @@ HTML = """<!doctype html>
               transcript, carries a short summary into the next turn, and clears any attached image.
             </div>
             <div style="display:flex; gap:10px;">
+              <button id="attachButton" class="secondary attach-button" type="button" aria-label="Attach image">+</button>
               <button id="clearButton" class="secondary" type="button">Clear</button>
               <button id="sendButton" class="primary" type="button">Send</button>
             </div>
           </div>
+          <div id="metrics" class="metrics" aria-live="polite"></div>
         </div>
       </section>
     </div>
@@ -575,10 +576,11 @@ HTML = """<!doctype html>
       ]);
 
       const messagesEl = document.getElementById("messages");
+      const composerEl = document.querySelector(".composer");
       const promptEl = document.getElementById("prompt");
       const sendButton = document.getElementById("sendButton");
+      const attachButton = document.getElementById("attachButton");
       const clearButton = document.getElementById("clearButton");
-      const maxTokensEl = document.getElementById("maxTokens");
       const statusEl = document.getElementById("status");
       const cacheNoticeEl = document.getElementById("cacheNotice");
       const runtimeEl = document.getElementById("runtime");
@@ -595,6 +597,7 @@ HTML = """<!doctype html>
       const attachmentImageEl = document.getElementById("attachmentImage");
       const attachmentNameEl = document.getElementById("attachmentName");
       const attachmentNoteEl = document.getElementById("attachmentNote");
+      const metricsEl = document.getElementById("metrics");
 
       let chat = [];
       let conversationSummary = "";
@@ -607,6 +610,10 @@ HTML = """<!doctype html>
       let busy = false;
       let presetsLoaded = false;
       let messagesRestored = false;
+
+      new ResizeObserver(() => {
+        messagesEl.style.paddingBottom = `${composerEl.offsetHeight + 34}px`;
+      }).observe(composerEl);
 
       function delay(ms) {
         return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -637,6 +644,63 @@ HTML = """<!doctype html>
         }
       }
 
+      async function fetchNdjson(url, options, onEvent) {
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), CHAT_TIMEOUT_MS);
+        try {
+          const response = await fetch(url, { ...options, signal: controller.signal });
+          if (!response.ok || !response.body) {
+            throw new Error(`Request failed with HTTP ${response.status}`);
+          }
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffered = "";
+          let finalEvent = null;
+          while (true) {
+            const { value, done } = await reader.read();
+            buffered += decoder.decode(value || new Uint8Array(), { stream: !done });
+            const lines = buffered.split("\\n");
+            buffered = lines.pop() || "";
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              const event = JSON.parse(line);
+              if (event.type === "error") throw new Error(event.error || "Generation failed");
+              onEvent(event);
+              if (event.type === "done") finalEvent = event;
+            }
+            if (done) break;
+          }
+          if (buffered.trim()) {
+            const event = JSON.parse(buffered);
+            if (event.type === "error") throw new Error(event.error || "Generation failed");
+            onEvent(event);
+            if (event.type === "done") finalEvent = event;
+          }
+          if (!finalEvent) throw new Error("The stream ended before generation completed");
+          return finalEvent;
+        } catch (error) {
+          if (error.name === "AbortError") {
+            throw new Error("The local generation timed out");
+          }
+          throw error;
+        } finally {
+          window.clearTimeout(timeoutId);
+        }
+      }
+
+      function formatMetrics(metrics, browserTtftMs) {
+        const parts = [];
+        const ttft = metrics && metrics.ttft_ms != null ? metrics.ttft_ms : browserTtftMs;
+        if (ttft != null) parts.push(`TTFT ${Math.round(ttft)} ms`);
+        if (metrics && metrics.average_tokens_per_s != null) {
+          parts.push(`${metrics.average_tokens_per_s.toFixed(1)} tok/s`);
+        }
+        if (metrics && metrics.generation_tokens != null) {
+          parts.push(`${metrics.generation_tokens} tokens`);
+        }
+        return parts.join("  ·  ");
+      }
+
       function readStoredJson(key, fallback) {
         const raw = sessionStorage.getItem(key);
         if (!raw) return fallback;
@@ -661,6 +725,7 @@ HTML = """<!doctype html>
         browseImageButtonEl.disabled = !imagesEnabled;
         imageInputEl.disabled = !imagesEnabled;
         removeImageButtonEl.disabled = busy || !activeImage;
+        attachButton.disabled = !imagesEnabled;
 
         if (activeImage) {
           attachmentPreviewEl.classList.add("visible");
@@ -765,7 +830,7 @@ HTML = """<!doctype html>
           renderMessage(
             "system",
             currentPresetSupportsImages
-              ? "Connected. The default Qwen model handles text and images; drag in an image whenever you need vision."
+              ? "Connected. The active model handles text and images; drag in an image whenever you need vision."
               : "Connected. Text uses the active model, and image turns use the configured vision preset when needed."
           );
         }
@@ -964,30 +1029,52 @@ HTML = """<!doctype html>
         persistState();
         promptEl.value = "";
 
-        const pending = renderMessage("assistant", "Thinking...");
+        const pending = renderMessage("assistant", "");
+        const pendingBody = pending.lastElementChild;
+        pending.classList.add("streaming");
         const routingToVision = Boolean(activeImage && !currentPresetSupportsImages);
         setBusy(true, routingToVision ? `Loading ${visionPresetLabel}` : "Generating");
+        metricsEl.textContent = routingToVision ? `Loading ${visionPresetLabel}…` : "Waiting for first token…";
 
         try {
-          const data = await fetchJson("/api/chat", {
+          const requestStarted = performance.now();
+          let firstPaintAt = null;
+          let streamedText = "";
+          const data = await fetchNdjson("/api/chat/stream", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               messages: chat,
               conversation_summary: conversationSummary,
-              max_tokens: Number(maxTokensEl.value) || 512,
               conversation_image: activeImage,
             }),
+          }, (event) => {
+            if (event.type === "delta") {
+              if (firstPaintAt === null) {
+                firstPaintAt = performance.now();
+                metricsEl.textContent = `TTFT ${Math.round(firstPaintAt - requestStarted)} ms  ·  streaming`;
+              }
+              streamedText += event.text || "";
+              pendingBody.textContent = streamedText;
+              messagesEl.scrollTop = messagesEl.scrollHeight;
+            }
           });
-          pending.textContent = data.reply;
-          if (data.current_preset) {
-            syncInfo(data);
+          pending.classList.remove("streaming");
+          pendingBody.textContent = data.reply || streamedText;
+          if (data.info) {
+            syncInfo(data.info);
           }
-          chat.push({ role: "assistant", content: data.reply });
+          metricsEl.textContent = formatMetrics(
+            data.metrics || {},
+            firstPaintAt === null ? null : firstPaintAt - requestStarted,
+          );
+          chat.push({ role: "assistant", content: data.reply || streamedText });
           persistState();
         } catch (error) {
-          pending.textContent = `Error: ${error.message}`;
+          pending.classList.remove("streaming");
+          pendingBody.textContent = `Error: ${error.message}`;
           pending.classList.add("system");
+          metricsEl.textContent = "";
         } finally {
           setBusy(false);
           promptEl.focus();
@@ -1047,6 +1134,9 @@ HTML = """<!doctype html>
         if (!busy && imageChatAvailable) {
           imageInputEl.click();
         }
+      });
+      attachButton.addEventListener("click", () => {
+        if (!busy && imageChatAvailable) imageInputEl.click();
       });
       removeImageButtonEl.addEventListener("click", () => {
         clearActiveImage({ announce: true });
@@ -1141,6 +1231,346 @@ HTML = """<!doctype html>
 """
 
 
+MODERN_CSS = r"""
+      :root {
+        color-scheme: dark;
+        --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --font-heading: var(--font-body);
+        --font-reading: var(--font-body);
+        --bg: #0b0d12;
+        --bg-secondary: #0b0d12;
+        --text: #f5f7fb;
+        --muted: #98a1b3;
+        --accent: #8b5cf6;
+        --accent-2: #22d3ee;
+        --accent-soft: rgba(139, 92, 246, 0.13);
+        --panel: rgba(17, 20, 28, 0.92);
+        --panel-strong: rgba(20, 23, 32, 0.96);
+        --line: rgba(255, 255, 255, 0.09);
+        --line-strong: rgba(139, 92, 246, 0.52);
+        --shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
+        --assistant: transparent;
+        --user: #242936;
+        --system: rgba(139, 92, 246, 0.08);
+      }
+
+      html, body { height: 100%; }
+      body {
+        min-height: 100%;
+        overflow: hidden;
+        background:
+          radial-gradient(circle at 20% -10%, rgba(139, 92, 246, 0.18), transparent 35%),
+          radial-gradient(circle at 90% 5%, rgba(34, 211, 238, 0.08), transparent 30%),
+          #0b0d12;
+        font-family: var(--font-body);
+      }
+
+      .shell {
+        width: 100%;
+        height: 100vh;
+        margin: 0;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        box-shadow: none;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+      }
+
+      .hero {
+        min-height: 64px;
+        padding: 10px 20px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        border-bottom: 1px solid var(--line);
+        background: rgba(11, 13, 18, 0.78);
+        backdrop-filter: blur(22px);
+        position: relative;
+        z-index: 5;
+      }
+
+      .hero-row { display: flex; align-items: center; gap: 12px; }
+      .eyebrow, .hero p, .hero-link { display: none; }
+      .hero h1 {
+        font-size: 16px;
+        letter-spacing: -0.01em;
+        font-weight: 650;
+      }
+      .hero h1::before {
+        content: "";
+        display: inline-block;
+        width: 11px;
+        height: 11px;
+        margin-right: 10px;
+        border-radius: 4px;
+        background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        box-shadow: 0 0 18px rgba(139, 92, 246, 0.55);
+      }
+
+      .meta { gap: 8px; margin-left: auto; }
+      .meta .pill:nth-child(-n+2) { display: none; }
+      .pill {
+        min-height: 34px;
+        padding: 7px 11px;
+        background: rgba(255,255,255,.035);
+        border-color: var(--line);
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .pill strong { color: #c8cfdd; font-weight: 550; }
+      .pill:last-child span::before {
+        content: "";
+        display: inline-block;
+        width: 7px;
+        height: 7px;
+        margin-right: 7px;
+        border-radius: 50%;
+        background: #34d399;
+        box-shadow: 0 0 10px rgba(52, 211, 153, .5);
+      }
+
+      .notice {
+        position: absolute;
+        top: 68px;
+        left: 50%;
+        width: min(620px, calc(100vw - 32px));
+        transform: translateX(-50%);
+        padding: 13px 16px 13px 44px;
+        border-width: 1px;
+        border-radius: 14px;
+        background: rgba(28, 24, 45, .97);
+        color: #ddd6fe;
+        font-size: 13px;
+        font-weight: 550;
+        box-shadow: var(--shadow);
+      }
+      .notice::before {
+        content: "";
+        position: absolute;
+        left: 17px;
+        top: 16px;
+        width: 12px;
+        height: 12px;
+        border: 2px solid rgba(196,181,253,.3);
+        border-top-color: #c4b5fd;
+        border-radius: 50%;
+        animation: spin .75s linear infinite;
+      }
+      .notice.downloading, .notice.error {
+        background: rgba(45, 25, 31, .97);
+        border-color: rgba(248,113,113,.35);
+        color: #fecaca;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
+      .chat {
+        min-height: 0;
+        height: 100%;
+        grid-template-rows: minmax(0, 1fr) auto;
+      }
+      .messages {
+        width: 100%;
+        padding: 38px max(24px, calc((100vw - 820px) / 2)) 170px;
+        gap: 28px;
+        background: transparent;
+        scroll-behavior: smooth;
+      }
+      .message {
+        max-width: 100%;
+        padding: 0;
+        border: 0;
+        border-radius: 0;
+        box-shadow: none;
+        font-size: 15.5px;
+        line-height: 1.72;
+        letter-spacing: -.005em;
+      }
+      .message > div:last-child { max-width: 76ch; }
+      .message.user {
+        justify-self: end;
+        width: fit-content;
+        max-width: min(78%, 680px);
+        padding: 11px 16px;
+        border-radius: 20px 20px 6px 20px;
+        background: var(--user);
+        color: var(--text);
+      }
+      .message.assistant { color: #e9edf5; }
+      .message.assistant::before {
+        content: "Local";
+        display: block;
+        margin-bottom: 7px;
+        color: #a78bfa;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+      }
+      .message.assistant.streaming > div:last-child::after {
+        content: "";
+        display: inline-block;
+        width: 7px;
+        height: 16px;
+        margin-left: 3px;
+        vertical-align: -2px;
+        border-radius: 2px;
+        background: #a78bfa;
+        animation: blink .8s steps(1) infinite;
+      }
+      @keyframes blink { 50% { opacity: .2; } }
+      .message.system {
+        justify-self: center;
+        width: fit-content;
+        max-width: 680px;
+        padding: 9px 13px;
+        border: 1px solid rgba(139,92,246,.16);
+        border-radius: 12px;
+        color: #aab2c2;
+        font-size: 13px;
+        text-align: center;
+      }
+
+      .composer {
+        position: absolute;
+        z-index: 4;
+        left: 50%;
+        bottom: 18px;
+        width: min(780px, calc(100vw - 32px));
+        transform: translateX(-50%);
+        padding: 10px;
+        border: 1px solid rgba(255,255,255,.11);
+        border-radius: 24px;
+        background: rgba(27, 30, 40, .93);
+        box-shadow: 0 18px 55px rgba(0,0,0,.45), 0 0 0 1px rgba(139,92,246,.04);
+        backdrop-filter: blur(22px);
+      }
+      .controls {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0 2px 6px;
+      }
+      .top-controls { margin: 0 auto 0 8px; }
+      .controls.top-controls label {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .top-controls .control-label {
+        display: inline;
+        color: #98a1b3;
+        font-size: 12px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .control-label { display: none; }
+      .controls label { display: contents; }
+      .controls label::first-line { font-size: 0; }
+      .controls.top-controls label::first-line { font-size: 12px; }
+      select, textarea {
+        background: rgba(255,255,255,.045);
+        border-color: transparent;
+        color: var(--text);
+        box-shadow: none;
+      }
+      select {
+        width: auto;
+        max-width: min(440px, 65vw);
+        height: 34px;
+        padding: 6px 32px 6px 10px;
+        border-radius: 10px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      input[type="number"] {
+        width: 82px;
+        height: 34px;
+        padding: 6px 9px;
+        border-radius: 10px;
+        font-size: 12px;
+      }
+      textarea {
+        min-height: 56px;
+        max-height: 190px;
+        padding: 12px 54px 8px 12px;
+        resize: none;
+        font-size: 15px;
+        line-height: 1.45;
+      }
+      textarea::placeholder { color: #747d90; }
+      .actions { margin: 2px 2px 0; min-height: 34px; }
+      .hint { display: none; }
+      .actions > div:last-child {
+        position: absolute;
+        left: 14px;
+        right: 14px;
+        bottom: 14px;
+        display: flex;
+        align-items: center;
+        pointer-events: none;
+      }
+      .actions > div:last-child button { pointer-events: auto; }
+      button { padding: 8px 13px; font-size: 12px; font-weight: 650; }
+      .primary {
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        font-size: 0;
+        background: linear-gradient(135deg, var(--accent), #6d4aff);
+        box-shadow: 0 7px 18px rgba(109,74,255,.28);
+      }
+      .primary::after { content: "↑"; font-size: 21px; line-height: 1; }
+      .secondary { background: rgba(255,255,255,.055); color: #c3cad7; border-color: var(--line); }
+      #clearButton { margin-right: 0; }
+      .attach-button {
+        position: static;
+        margin-right: auto;
+        width: 34px;
+        height: 34px;
+        padding: 0;
+        border-radius: 50%;
+        font-size: 21px;
+        line-height: 1;
+      }
+      .dropzone {
+        display: none;
+        margin: 5px 2px 7px;
+        padding: 10px;
+        border-radius: 14px;
+        background: rgba(139,92,246,.06);
+      }
+      .dropzone:has(.attachment-preview.visible) { display: grid; }
+      .dropzone-header { display: none; }
+      .attachment-preview { grid-template-columns: 56px minmax(0,1fr); }
+      .attachment-preview img { width: 56px; height: 56px; border-radius: 10px; }
+      .message-image-note { margin: 0 0 7px; background: rgba(139,92,246,.1); color: #c4b5fd; }
+      .metrics {
+        min-height: 17px;
+        margin: 3px 48px 0;
+        text-align: center;
+        color: #7f899c;
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+      }
+      input:focus, select:focus, textarea:focus, button:focus-visible {
+        border-color: rgba(139,92,246,.45);
+        box-shadow: 0 0 0 3px rgba(139,92,246,.1);
+      }
+
+      @media (max-width: 720px) {
+        .shell { width: 100%; margin: 0; }
+        .hero { min-height: 56px; padding: 8px 12px; }
+        .meta .pill:nth-child(-n+2) { display: none; }
+        .messages { padding: 26px 16px 170px; }
+        .message.user { max-width: 88%; }
+        .composer { bottom: 8px; width: calc(100vw - 16px); border-radius: 20px; }
+        .hint { max-width: calc(100% - 105px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      }
+"""
+
+
 class AppServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
@@ -1157,6 +1587,7 @@ class AppServer(ThreadingHTTPServer):
 
 class ChatHandler(BaseHTTPRequestHandler):
     server: AppServer
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
         return
@@ -1176,6 +1607,25 @@ class ChatHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
+
+    def _start_ndjson(self) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+
+    def _send_ndjson_event(self, payload: dict[str, Any]) -> None:
+        body = (json.dumps(payload) + "\n").encode("utf-8")
+        self.wfile.write(f"{len(body):X}\r\n".encode("ascii"))
+        self.wfile.write(body)
+        self.wfile.write(b"\r\n")
+        self.wfile.flush()
+
+    def _finish_ndjson(self) -> None:
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
 
     def _read_json(self) -> dict[str, Any]:
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -1246,7 +1696,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/":
-            page = HTML.replace("__DEFAULT_MAX_TOKENS__", str(self.server.default_max_tokens))
+            page = HTML.replace("</head>", f"<style>{MODERN_CSS}</style></head>")
             self._send_html(page)
             return
         if self.path == "/api/info":
@@ -1255,7 +1705,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         self._send_json({"error": "Not found"}, status=404)
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path not in {"/api/chat", "/api/switch-preset"}:
+        if self.path not in {"/api/chat", "/api/chat/stream", "/api/switch-preset"}:
             self._send_json({"error": "Not found"}, status=404)
             return
 
@@ -1266,6 +1716,38 @@ class ChatHandler(BaseHTTPRequestHandler):
             conversation_image = self._validate_conversation_image(payload)
         except ValueError as exc:
             self._send_json({"error": str(exc)}, status=400)
+            return
+
+        if self.path == "/api/chat/stream":
+            max_tokens = int(payload.get("max_tokens", self.server.default_max_tokens))
+            self._start_ndjson()
+            try:
+                result = self.server.manager.stream_chat(
+                    messages=messages,
+                    conversation_summary=conversation_summary,
+                    max_tokens=max_tokens,
+                    conversation_image=conversation_image,
+                    on_text=lambda text: self._send_ndjson_event(
+                        {"type": "delta", "text": text}
+                    ),
+                )
+                self._send_ndjson_event(
+                    {
+                        "type": "done",
+                        "reply": result.text,
+                        "metrics": asdict(result.metrics),
+                        "info": self._info_payload(),
+                    }
+                )
+                self._finish_ndjson()
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    self._send_ndjson_event({"type": "error", "error": str(exc)})
+                    self._finish_ndjson()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
             return
 
         if self.path == "/api/chat":
@@ -1332,7 +1814,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8099)
-    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=DEFAULT_MAX_TOKENS,
+        help="Default generated tokens per reply; -1 runs until the model stops (default: -1).",
+    )
     parser.add_argument("--system-prompt", default=None)
     parser.add_argument("--open-browser", action="store_true")
     parser.add_argument("--ctx-size", type=int, default=16384)
